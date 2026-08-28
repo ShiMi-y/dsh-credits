@@ -19,8 +19,10 @@ import { z } from 'zod'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
-import { resolveModelPrice, priceBuckets, officialV4ConfigPrices, normalizePricingCurrency } from './pricing.js'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { priceBuckets, officialV4ConfigPrices, normalizePricingCurrency } from './pricing.js'
 import { applySpendEvent, aggregateSpend, initSpendFold, resolveSpendRange } from './spend.js'
+import { tokenrhythmProviderPrices } from './tokenrhythm-prices.js'
 
 export { resolveModelPrice } from './pricing.js'
 export const name = 'dsh-credits'
@@ -170,6 +172,20 @@ export const QUOTA_SOURCE_TEMPLATES = [
       request: { url: 'https://api.minimax.io/v1/api/openplatform/coding_plan/remains', authRef: 'MINIMAX_API_KEY', authStyle: 'bearer' },
     },
   },
+  {
+    id: 'tokenrhythm',
+    category: 'balance',
+    name: '基元律动钱包余额',
+    description: '查询基元律动账户钱包余额（CNY），凭证为登录 Cookie',
+    builtin: true,
+    source: {
+      id: 'tokenrhythm', name: '基元律动钱包', kind: 'metric', providerIds: ['tokenrhythm'],
+      request: { url: 'https://tokenrhythm.studio/api/wallet/summary', authRef: 'TOKENRHYTHM_COOKIE', authStyle: 'cookie' },
+      response: { metrics: [
+        { key: 'balance', label: '可用余额', calculation: 'direct', valuePath: '$.data.availableBalanceCny', unit: 'CNY' },
+      ] },
+    },
+  },
 ]
 
 export const getQuotaSourceTemplate = (id) =>
@@ -194,6 +210,7 @@ export const matchQuotaTemplateForProvider = (provider, baseURL = '') => {
     ['api.z.ai', 'zhipu-en-coding'],
     ['api.minimaxi.com', 'minimax-cn-coding'],
     ['api.minimax.io', 'minimax-en-coding'],
+    ['tokenrhythm.studio', 'tokenrhythm'],
   ].find(([needle]) => url.includes(needle))
   return byUrl ? { builtin: false, id: byUrl[1] } : null
 }
@@ -329,6 +346,9 @@ const normalizeProviderQuotaConfig = (binding) => {
   if (sourceType === 'provider' && !normalized.sourceProviderId) throw new Error('provider-quota-source-provider-required')
   if (sourceType === 'custom') {
     normalized.source = normalizeQuotaSourceConfig(binding.source)
+  } else if (sourceType === 'template' && binding.source) {
+    // 模板绑定可携带可选 source：与模板默认源合并/覆盖凭证（如页面填写的 Cookie，按 provider 隔离）。
+    normalized.source = normalizeQuotaSourceConfig(binding.source)
   }
   return normalized
 }
@@ -372,6 +392,9 @@ export const buildProviderQuotaAdapter = (provider, rawBinding = {}) => {
   const template = getQuotaSourceTemplate(templateId)
   if (!template) return null
   const source = mergeQuotaSourceTemplate({ template: templateId })
+  const sourceOverride = rawBinding.source?.request && Object.keys(rawBinding.source.request ?? {}).length
+    ? rawBinding.source.request
+    : null
   return {
     ...source,
     id: providerQuotaAdapterId(providerId),
@@ -385,6 +408,7 @@ export const buildProviderQuotaAdapter = (provider, rawBinding = {}) => {
     quotaTemplateName: template.name,
     request: {
       ...(source.request ?? {}),
+      ...(sourceOverride ?? {}),
       url: providerTemplateUrl(provider, sourceType, templateId, source.request?.url),
       dshProvider: providerId,
     },
@@ -415,6 +439,18 @@ export const normalizeDockLayout = (value) =>
   String(value ?? 'own').trim().toLowerCase() === 'shared' ? 'shared' : 'own'
 
 const normalizeProvider = (value) => String(value ?? '').trim().toLowerCase()
+
+/** 合并渠道级价格表: 默认表逐渠道保留, 用户配置按渠道覆盖并可只覆盖单个模型。 */
+const mergeProviderPriceTables = (base, override = {}) => {
+  const next = { ...(base ?? {}) }
+  for (const [providerId, models] of Object.entries(override ?? {})) {
+    next[providerId] = {
+      ...(next[providerId] ?? {}),
+      ...(models && typeof models === 'object' ? models : {}),
+    }
+  }
+  return next
+}
 
 const providerMatchesAdapter = (adapter, provider) => {
   const p = normalizeProvider(provider)
@@ -463,6 +499,22 @@ const TokenRate = Schema.object({
   output: Schema.number().min(0),
 })
 
+/** 时间分段的单价（固定三字段，或带 peak/offPeak 继续叠加日内峰谷）。 */
+const SchedulePrice = Schema.object({
+  cacheHit: Schema.number().min(0).default(0.2),
+  cacheMiss: Schema.number().min(0).default(2),
+  output: Schema.number().min(0).default(8),
+  peak: TokenRate,
+  offPeak: TokenRate,
+})
+
+/** 时间分段：半开区间 [from, to)，ISO 字符串或毫秒；多条同时命中取 from 最大者。 */
+const PriceSchedule = Schema.object({
+  from: Schema.string().default(''),
+  to: Schema.string().default(''),
+  price: SchedulePrice,
+})
+
 /** 每个模型每 100 万 token 的价格(以 `currency` 计价)。V4 另可配 peak / offPeak。 */
 const ModelPrice = Schema.object({
   /** 缓存命中输入价(无峰谷时使用; 有峰谷时与高峰价对齐) */
@@ -475,6 +527,8 @@ const ModelPrice = Schema.object({
   peak: TokenRate,
   /** 低谷时段单价; 缺省则 V4 走内置官方表 */
   offPeak: TokenRate,
+  /** 时间分段定价; 命中分段时按分段价(可再叠加峰谷), 未命中回退本模型整体价 */
+  schedules: Schema.array(PriceSchedule).default([]),
 })
 
 /** 自定义额度源请求配置。 */
@@ -571,6 +625,10 @@ export const Config = Schema.object({
   showPopover: Schema.boolean().default(true),
   /** 底部统计条是否展示实时生成吞吐 TPS */
   showTps: Schema.boolean().default(true),
+  /** 底部统计条剩余余额读数前是否展示当前会话 ID (截断显示, 点击复制完整值) */
+  showSessionId: Schema.boolean().default(true),
+  /** 胶囊中是否展示各模型每 1M tokens 单价 */
+  showPricePerMToken: Schema.boolean().default(false),
   /** 旧版兼容字段；仅在没有 providerQuotas 的旧配置中作为默认源。 */
   provider: Schema.string().default('deepseek'),
   /** 显式 DeepSeek API 密钥; 留空则走 apiKeyRef(credentials / 环境变量) */
@@ -594,6 +652,8 @@ export const Config = Schema.object({
   /** 花费估算的计价货币(与 prices 一致) */
   currency: Schema.string().default('CNY'),
   prices: Schema.dict(ModelPrice).default(officialV4ConfigPrices('CNY')),
+  /** 渠道×模型两级定价: providerPrices[providerId][model]; 未配置时回退顶级 prices / defaultPrices */
+  providerPrices: Schema.dict(Schema.dict(ModelPrice)).default({}),
   /** 余额预警阈值(DeepSeek: 余额低于此值; OpenCode Go: 剩余额度低于此百分比) */
   warningThreshold: Schema.number().min(0).default(10),
   /** 余额告急阈值(DeepSeek: 余额低于此值; OpenCode Go: 剩余额度低于此百分比) */
@@ -660,6 +720,12 @@ const setHeader = (headers, name, value) => {
   headers[current || name] = value
 }
 
+/** 基元律动等 Cookie 鉴权：用户常只贴 sess_ 会话值，自动补全 tr_session= 键名。 */
+const normalizeCookieValue = (value) => {
+  const raw = String(value ?? '').trim()
+  return /^sess_[A-Za-z0-9_-]+$/.test(raw) ? `tr_session=${raw}` : raw
+}
+
 /** 将通用鉴权配置物化为 fetch URL / init，供运行时和测试共同使用。 */
 export const buildCustomHttpRequest = (request = {}, credential = '') => {
   let url = String(request.url ?? '').trim()
@@ -675,7 +741,7 @@ export const buildCustomHttpRequest = (request = {}, credential = '') => {
     else if (style === 'token') setHeader(headers, authHeader, `Token ${credential}`)
     else if (style === 'basic') setHeader(headers, authHeader, `Basic ${Buffer.from(credential, 'utf8').toString('base64')}`)
     else if (style === 'header') setHeader(headers, authHeader, credential)
-    else if (style === 'cookie') setHeader(headers, 'Cookie', credential)
+    else if (style === 'cookie') setHeader(headers, 'Cookie', normalizeCookieValue(credential))
     else if (style === 'query') {
       const parsed = new URL(url)
       parsed.searchParams.set(authParam, credential)
@@ -1093,10 +1159,6 @@ export const makeCostProjection = (configOrGetter) => {
   const bucketsEqual = (a, b) =>
     a.uncachedInputTokens === b.uncachedInputTokens && a.cacheReadTokens === b.cacheReadTokens &&
     a.cacheWriteTokens === b.cacheWriteTokens && a.outputTokens === b.outputTokens
-  const eventTime = (event) => {
-    const t = Number(event?.time)
-    return Number.isFinite(t) && t > 0 ? t : Date.now()
-  }
   const round6 = (n) => Math.round(n * 1e6) / 1e6
 
   const viewSchema = z.object({
@@ -1118,6 +1180,7 @@ export const makeCostProjection = (configOrGetter) => {
     legs: z.array(z.object({
       t: z.number(),
       model: z.string(),
+      provider: z.string(),
       uncachedInput: z.number().int().nonnegative(),
       cacheRead: z.number().int().nonnegative(),
       cacheWrite: z.number().int().nonnegative(),
@@ -1134,6 +1197,7 @@ export const makeCostProjection = (configOrGetter) => {
   }).strict()
   const stateSchema = z.object({
     currentModel: z.string().nullable(),
+    currentProvider: z.string().nullable().optional(),
     last: z.object({
       turn: z.number().int().nonnegative(),
       step: z.number().int().nonnegative(),
@@ -1142,6 +1206,7 @@ export const makeCostProjection = (configOrGetter) => {
     samples: z.record(z.string(), z.object({
       t: z.number(),
       model: z.string(),
+      provider: z.string().optional(),
       buckets: bucketSchema,
     }).strict()),
     modelOrder: z.array(z.string()),
@@ -1167,12 +1232,13 @@ export const makeCostProjection = (configOrGetter) => {
           cacheWrite: prevTok.cacheWrite + b.cacheWriteTokens,
           output: prevTok.output + b.outputTokens,
         }
-        const c = priceBuckets(cfg, model, b, sample.t)
+        const c = priceBuckets(cfg, model, b, sample.t, sample.provider)
         if (c > 0) costByModel[model] = round6((costByModel[model] ?? 0) + c)
         cost += c
         legs.push({
           t: sample.t,
           model,
+          provider: sample.provider ?? '',
           uncachedInput: b.uncachedInputTokens,
           cacheRead: b.cacheReadTokens,
           cacheWrite: b.cacheWriteTokens,
@@ -1195,15 +1261,20 @@ export const makeCostProjection = (configOrGetter) => {
     key: 'queryCreditsCost',
     stateSchema,
     schema: viewSchema,
-    init: () => ({ currentModel: null, last: null, samples: {}, modelOrder: [] }),
+    init: () => ({ currentModel: null, currentProvider: null, last: null, samples: {}, modelOrder: [] }),
     apply: (state, event) => {
       let nextModel = state.currentModel
+      let nextProvider = state.currentProvider
       if (event.type === 'request/header') {
         const model = event.data.header?.config?.model
         if (typeof model === 'string' && model !== '') nextModel = model
+        const provider = event.data.header?.config?.provider
+        if (typeof provider === 'string' && provider !== '') nextProvider = provider
       } else if (event.type === 'request/context') {
         const model = event.data.model
         if (typeof model === 'string' && model !== '') nextModel = model
+        const provider = event.data.provider
+        if (typeof provider === 'string' && provider !== '') nextProvider = provider
       }
       let usage = null
       let turn = 0
@@ -1215,26 +1286,31 @@ export const makeCostProjection = (configOrGetter) => {
         ({ turn, step, usage } = event.data)
       }
       if (usage === null) {
-        return nextModel === state.currentModel ? state : { ...state, currentModel: nextModel }
+        if (nextModel === state.currentModel && nextProvider === state.currentProvider) return state
+        return { ...state, currentModel: nextModel, currentProvider: nextProvider }
       }
       const model = nextModel ?? 'unknown'
+      const provider = nextProvider ?? undefined
       const buckets = bucketsOf(usage)
-      const t = eventTime(event)
       const key = `${turn}:${step}`
       const previous = state.samples?.[key]
-      if (previous && previous.model === model && bucketsEqual(previous.buckets, buckets) && previous.t === t) {
-        return nextModel === state.currentModel ? state : { ...state, currentModel: nextModel }
+      const rawTime = Number(event?.time)
+      const t = Number.isFinite(rawTime) && rawTime > 0 ? rawTime : (previous?.t ?? Date.now())
+      if (previous && previous.model === model && previous.provider === provider && bucketsEqual(previous.buckets, buckets) && previous.t === t) {
+        if (nextModel === state.currentModel && nextProvider === state.currentProvider) return state
+        return { ...state, currentModel: nextModel, currentProvider: nextProvider }
       }
       const isNewModel = !(state.modelOrder ?? []).includes(model)
       return {
         currentModel: nextModel,
+        currentProvider: nextProvider,
         last: { turn, step, model },
-        samples: { ...(state.samples ?? {}), [key]: { t, model, buckets } },
+        samples: { ...(state.samples ?? {}), [key]: { t, model, provider, buckets } },
         modelOrder: isNewModel ? [...(state.modelOrder ?? []), model] : state.modelOrder,
       }
     },
     view,
-    stateVersion: 2,
+    stateVersion: 3,
     wire: { viewSchema, view },
   }
 }
@@ -1456,6 +1532,8 @@ export function apply(ctx, config) {
     showCapsule: config.showCapsule !== false,
     showPopover: config.showPopover !== false,
     showTps: config.showTps !== false,
+    showSessionId: config.showSessionId !== false,
+    showPricePerMToken: config.showPricePerMToken === true,
     provider: config.provider ?? 'deepseek',
     apiKey: config.apiKey ?? '',
     apiKeyRef: config.apiKeyRef ?? 'DEEPSEEK_API_KEY',
@@ -1471,10 +1549,40 @@ export function apply(ctx, config) {
     warningThreshold: config.warningThreshold ?? 10,
     dangerThreshold: config.dangerThreshold ?? 5,
     prices: { ...(config.prices ?? {}) },
+    providerPrices: mergeProviderPriceTables(tokenrhythmProviderPrices(), config.providerPrices),
     defaultPrices: { ...(config.defaultPrices ?? { cacheHit: 0.1, cacheMiss: 1, output: 2 }) },
     quotaSources: Array.isArray(config.quotaSources) ? config.quotaSources.map((s) => ({ ...s })) : [],
     providerQuotas: Array.isArray(config.providerQuotas) ? config.providerQuotas.map((binding) => ({ ...binding })) : [],
   }
+
+  // 动态配置持久化：写入 DSH_HOME/storages/dsh-credits-config.json，避免重启丢失设置。
+  const configFile = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'storages', 'dsh-credits-config.json')
+  const persistedConfigKeys = [
+    'enabled', 'quotaMode', 'showDock', 'dockLayout', 'showCapsule', 'showPopover', 'showTps', 'showSessionId', 'showPricePerMToken',
+    'provider', 'apiKeyRef', 'baseUrl', 'opencodeApiKeyRef', 'opencodeBaseUrl',
+    'refreshIntervalMs', 'clientPollIntervalMs', 'timeoutMs', 'currency',
+    'warningThreshold', 'dangerThreshold', 'prices', 'providerPrices', 'defaultPrices',
+    'quotaSources', 'providerQuotas',
+  ]
+  const persistConfig = () => {
+    const snapshot = { version: 1, savedAt: Date.now() }
+    for (const key of persistedConfigKeys) snapshot[key] = runtimeConfig[key]
+    // 绝不把明文密钥（apiKey / opencodeApiKey）写进该文件：它们来自 DSH 配置或 credentials 引用。
+    try {
+      mkdirSync(dirname(configFile), { recursive: true })
+      writeFileSync(configFile, JSON.stringify(snapshot))
+    } catch { /* 磁盘不可写时保持内存态 */ }
+  }
+  try {
+    const raw = readFileSync(configFile, 'utf8')
+    const persisted = JSON.parse(raw)
+    if (persisted && typeof persisted === 'object') {
+      for (const key of persistedConfigKeys) {
+        if (Object.hasOwn(persisted, key)) runtimeConfig[key] = persisted[key]
+      }
+      runtimeConfig.providerPrices = mergeProviderPriceTables(tokenrhythmProviderPrices(), runtimeConfig.providerPrices)
+    }
+  } catch { /* 首启或文件损坏时使用 DSH 静态配置 */ }
 
   const getConfig = () => runtimeConfig
   let remountCostProjection = () => {}
@@ -1510,7 +1618,7 @@ export function apply(ctx, config) {
     if (!sessionId) return
     let state = initSpendFold()
     for (const event of events ?? []) state = applySpendEvent(state, event)
-    spendFolds.set(String(sessionId), state)
+    mergeSpendFold(String(sessionId), state)
     scheduleSaveSpend()
   }
   const ingestLiveEvent = (session, event) => {
@@ -1520,10 +1628,25 @@ export function apply(ctx, config) {
     spendFolds.set(key, applySpendEvent(spendFolds.get(key) ?? initSpendFold(), event))
     scheduleSaveSpend()
   }
+  /**
+   * 全部会话的用量样本出口。
+   *
+   * fork 复制去重: DSH 的 fork() 会把父会话前缀事件原样复制到子会话(保留原始
+   * time 戳与 turn/step), 这些样本与上游会话的样本在跨会话指纹上完全一致;
+   * 不去重会把同一笔 LLM 调用按 fork 链长度重复计费。指纹 = t | model |
+   * provider | 四桶 token, 按会话 id 排序遍历保证去重归属确定性。
+   */
   const allSpendSamples = () => {
+    const seen = new Set()
     const out = []
-    for (const [sessionId, state] of spendFolds) {
-      for (const sample of Object.values(state.samples ?? {})) out.push({ ...sample, sessionId })
+    for (const [sessionId, state] of [...spendFolds].sort((a, b) => String(a[0]).localeCompare(String(b[0])))) {
+      for (const sample of Object.values(state.samples ?? {})) {
+        const b = sample.buckets ?? {}
+        const fp = [sample.t, sample.model, sample.provider ?? '', b.uncachedInputTokens, b.cacheReadTokens, b.cacheWriteTokens, b.outputTokens].join('|')
+        if (seen.has(fp)) continue
+        seen.add(fp)
+        out.push({ ...sample, sessionId })
+      }
     }
     return out
   }
@@ -1878,10 +2001,12 @@ export function apply(ctx, config) {
     const url = String(request.url ?? '').trim()
     if (!url) throw new Error('quota-url-missing')
     let key = request.authValue && request.authValue !== '***' ? String(request.authValue) : ''
-    if (!key && request.dshProvider) key = await resolveDshProviderCredential(request.dshProvider)
+    // 优先使用 source 自身的凭证引用（模板 Cookie / 自定义引用），其次才回退到 DSH 供应商的 API Key。
+    // 否则 tokenrhythm 这类「Cookie 鉴权模板」会被 provider 的 api-key 抢走并导致 401。
     if (request.authRef) {
       key ||= await resolveCredential(request.authRef)
     }
+    if (!key && request.dshProvider) key = await resolveDshProviderCredential(request.dshProvider)
     const authStyle = normalizeProvider(request.authStyle ?? 'none')
     if (authStyle !== 'none' && key === '') throw new Error('quota-credential-missing')
     const customRequest = buildCustomHttpRequest(request, key)
@@ -1924,7 +2049,7 @@ export function apply(ctx, config) {
         return {
           provider: adapter.id,
           kind: 'balance',
-          isAvailable: data?.is_available === true,
+          isAvailable: data?.is_available !== false,
           balances: normalizeCustomBalances(data, adapter.response),
           ...preview,
         }
@@ -2128,6 +2253,8 @@ export function apply(ctx, config) {
       showCapsule: runtimeConfig.showCapsule !== false,
       showPopover: runtimeConfig.showPopover !== false,
       showTps: runtimeConfig.showTps !== false,
+      showSessionId: runtimeConfig.showSessionId !== false,
+      showPricePerMToken: runtimeConfig.showPricePerMToken === true,
       provider: runtimeConfig.provider,
       hasCustomKey: Boolean(runtimeConfig.apiKey),
       apiKeyMasked: maskKey(runtimeConfig.apiKey),
@@ -2144,6 +2271,7 @@ export function apply(ctx, config) {
       warningThreshold: runtimeConfig.warningThreshold,
       dangerThreshold: runtimeConfig.dangerThreshold,
       prices: { ...runtimeConfig.prices },
+      providerPrices: { ...runtimeConfig.providerPrices },
       defaultPrices: { ...runtimeConfig.defaultPrices },
       quotaSources: await sanitizeCustomQuotaSources(),
       providerQuotas: await sanitizeProviderQuotas(),
@@ -2219,6 +2347,8 @@ export function apply(ctx, config) {
         showCapsule: runtimeConfig.showCapsule !== false,
         showPopover: runtimeConfig.showPopover !== false,
         showTps: runtimeConfig.showTps !== false,
+        showSessionId: runtimeConfig.showSessionId !== false,
+        showPricePerMToken: runtimeConfig.showPricePerMToken === true,
         fetchedAt: view.fetchedAt,
         refreshIntervalMs: runtimeConfig.refreshIntervalMs,
         clientPollIntervalMs: runtimeConfig.clientPollIntervalMs,
@@ -2228,11 +2358,8 @@ export function apply(ctx, config) {
           warning: runtimeConfig.warningThreshold,
           danger: runtimeConfig.dangerThreshold,
         },
-        prices: {
-          ...runtimeConfig.prices,
-          'deepseek-v4-flash': resolveModelPrice(runtimeConfig, 'deepseek-v4-flash'),
-          'deepseek-v4-pro': resolveModelPrice(runtimeConfig, 'deepseek-v4-pro'),
-        },
+        prices: { ...runtimeConfig.prices },
+        providerPrices: { ...runtimeConfig.providerPrices },
         defaultPrices: runtimeConfig.defaultPrices,
         quotaSources: adapters.map((adapter) => ({
           id: adapter.id,
@@ -2321,6 +2448,8 @@ export function apply(ctx, config) {
               if (typeof body.showCapsule === 'boolean') runtimeConfig.showCapsule = body.showCapsule
               if (typeof body.showPopover === 'boolean') runtimeConfig.showPopover = body.showPopover
               if (typeof body.showTps === 'boolean') runtimeConfig.showTps = body.showTps
+              if (typeof body.showSessionId === 'boolean') runtimeConfig.showSessionId = body.showSessionId
+              if (typeof body.showPricePerMToken === 'boolean') runtimeConfig.showPricePerMToken = body.showPricePerMToken
               if (typeof body.provider === 'string' && body.provider.trim()) runtimeConfig.provider = body.provider.trim()
               if (typeof body.apiKey === 'string') runtimeConfig.apiKey = body.apiKey.trim()
               if (typeof body.apiKeyRef === 'string' && body.apiKeyRef.trim()) runtimeConfig.apiKeyRef = body.apiKeyRef.trim()
@@ -2349,7 +2478,9 @@ export function apply(ctx, config) {
                 const nextBindings = []
                 for (const rawBinding of body.providerQuotas) {
                   const prev = prevBindings.find((binding) => normalizeProvider(binding.providerId) === normalizeProvider(rawBinding?.providerId))
-                  if (rawBinding?.sourceType !== 'custom' || !rawBinding.source) {
+                  const carriesCredentialSource = rawBinding?.source?.request
+                    && (rawBinding.sourceType === 'custom' || rawBinding.sourceType === 'template')
+                  if (!carriesCredentialSource) {
                     nextBindings.push(normalizeProviderQuotaConfig(rawBinding))
                     continue
                   }
@@ -2375,13 +2506,16 @@ export function apply(ctx, config) {
               if (typeof body.warningThreshold === 'number' && body.warningThreshold >= 0) runtimeConfig.warningThreshold = body.warningThreshold
               if (typeof body.dangerThreshold === 'number' && body.dangerThreshold >= 0) runtimeConfig.dangerThreshold = body.dangerThreshold
               if (typeof body.refreshIntervalMs === 'number' && body.refreshIntervalMs >= 1000) runtimeConfig.refreshIntervalMs = body.refreshIntervalMs
-              if (typeof body.clientPollIntervalMs === 'number' && body.clientPollIntervalMs >= 1000) runtimeConfig.clientPollIntervalMs = body.clientPollIntervalMs
+              if (typeof body.clientPollIntervalMs === 'number' && body.clientPollIntervalMs >= 5000) runtimeConfig.clientPollIntervalMs = body.clientPollIntervalMs
               if (typeof body.timeoutMs === 'number' && body.timeoutMs >= 1000) runtimeConfig.timeoutMs = body.timeoutMs
               if (typeof body.currency === 'string' && body.currency.trim()) runtimeConfig.currency = normalizePricingCurrency(body.currency)
             }
             // 总开关只停用额度相关功能；模型单价与 YAML 导出仍然可独立使用。
             if (body.prices && typeof body.prices === 'object') {
               runtimeConfig.prices = { ...body.prices }
+            }
+            if (body.providerPrices && typeof body.providerPrices === 'object') {
+              runtimeConfig.providerPrices = { ...body.providerPrices }
             }
             if (body.defaultPrices && typeof body.defaultPrices === 'object') {
               runtimeConfig.defaultPrices = { ...runtimeConfig.defaultPrices, ...body.defaultPrices }
@@ -2392,6 +2526,7 @@ export function apply(ctx, config) {
             // 配置变更后重设刷新循环并立即拉取一次最新数据
             resetLoop()
             await refresh()
+            persistConfig()
 
             sendJson(res, 200, {
               ok: true,
@@ -2576,6 +2711,8 @@ export function apply(ctx, config) {
           currency: agg.currency,
           cost: agg.cost,
           costByModel: agg.costByModel,
+          tokensByModel: agg.tokensByModel,
+          providerByModel: agg.providerByModel ?? {},
           tokens: agg.tokens,
           calls: agg.calls,
           sessions: agg.sessions,
@@ -2587,7 +2724,8 @@ export function apply(ctx, config) {
   // 可选 sessionProjections: 会话花费投影 (使用动态 getter)
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     let disposers = []
-    let stateVersion = 2
+    let costStateVersion = 3
+    let tpsStateVersion = 1
     const mount = () => {
       for (const dispose of disposers) {
         if (typeof dispose === 'function') {
@@ -2596,8 +2734,10 @@ export function apply(ctx, config) {
       }
       disposers = []
       // 保持 queryCreditsCost 最后注册，兼容宿主按最近注册单元读取的旧实现。
-      for (const unit of [makeTpsProjection(), makeCostProjection(getConfig)]) {
-        unit.stateVersion = stateVersion
+      const units = [makeTpsProjection(), makeCostProjection(getConfig)]
+      units[0].stateVersion = tpsStateVersion
+      units[1].stateVersion = costStateVersion
+      for (const unit of units) {
         const ret = projectionCtx.sessionProjections.register(unit)
         const dispose = typeof ret === 'function'
           ? ret
@@ -2606,7 +2746,7 @@ export function apply(ctx, config) {
       }
     }
     remountCostProjection = () => {
-      stateVersion += 1
+      costStateVersion += 1
       mount()
     }
     mount()

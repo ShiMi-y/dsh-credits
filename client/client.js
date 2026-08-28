@@ -40,6 +40,11 @@ window.__ModuleLoader__.load({
 				".dshqb_sep{display:inline-flex;align-items:center;justify-content:center;color:var(--dsw-alias-separator-primary,var(--dsw-alias-border-l3,rgba(128,128,128,0.25)));margin:0 10px;user-select:none}",
 				".dshqb_trigger{position:relative;display:inline-flex;align-items:center;cursor:default}",
 				".dshqb_amount{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;display:inline-flex;align-items:center}",
+				".dshqb_sid{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;display:inline-flex;align-items:center;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:16px;border:none;background:transparent;padding:2px 6px;margin:0 -2px;border-radius:5px;cursor:pointer;transition:color .15s ease,background-color .15s ease}",
+				".dshqb_sid:hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,0.1))}",
+				".dshqb_sid:active{transform:scale(.97)}",
+				".dshqb_sid:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
+				".dshqb_sid_copied{color:var(--dsw-alias-state-success-primary,#10b981)}",
 				".dshqb_error{color:var(--dsw-alias-state-error-primary,#ef4444);display:inline-flex;align-items:center}",
 				".dshqb_dot{display:block;width:7px;height:7px;border-radius:50%;margin-right:6px;flex-shrink:0;transition:background-color .2s ease,box-shadow .2s ease,transform .2s ease}",
 				".dshqb_dot_btn{cursor:pointer;border:none;padding:0;background:transparent;outline:none;display:inline-flex;align-items:center;justify-content:center;line-height:1}",
@@ -102,7 +107,7 @@ window.__ModuleLoader__.load({
 				".dshqb_quota_meta{display:flex;justify-content:space-between;font-size:10.5px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}",
 				".dshqb_cap{position:fixed;z-index:10050;font-size:12px;color:var(--dsw-alias-label-primary);line-height:1.4;user-select:none;cursor:grab}",
 				".dshqb_cap_pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;cursor:pointer;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.2));background:var(--dsw-alias-bg-layer-1,rgba(20,20,24,0.88));box-shadow:var(--dsw-shadow-lv3,0 8px 24px rgba(0,0,0,0.18));backdrop-filter:blur(16px);font-variant-numeric:tabular-nums}",
-				".dshqb_cap_panel{width:320px;max-width:92vw;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.2));background:var(--dsw-alias-bg-layer-1,rgba(20,20,24,0.94));box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,0.22));backdrop-filter:blur(16px);box-sizing:border-box;white-space:normal;overflow-wrap:anywhere}",
+				".dshqb_cap_panel{width:368px;max-width:92vw;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,0.2));background:var(--dsw-alias-bg-layer-1,rgba(20,20,24,0.94));box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,0.22));backdrop-filter:blur(16px);box-sizing:border-box;white-space:normal;overflow-wrap:anywhere}",
 				".dshqb_cap_head{display:flex;align-items:center;justify-content:space-between;cursor:move;font-weight:600}",
 				".dshqb_cap_chips{display:flex;flex-wrap:wrap;gap:6px}",
 				".dshqb_cap_chip{border:1px solid rgba(128,128,128,0.28);background:rgba(255,255,255,0.08);color:var(--dsw-alias-label-secondary,#d4d4d8);border-radius:999px;padding:3px 9px;cursor:pointer;font-size:11px;font-family:inherit}",
@@ -384,17 +389,25 @@ window.__ModuleLoader__.load({
 			if (n === null || n === undefined || !Number.isFinite(n)) return "—";
 			return String(Math.round(n * 10) / 10) + "%";
 		}
-		/** ISO 时间显示(尽量本地化)。 */
+		/** ISO 时间显示(固定本地数字格式, 避免不同运行环境 locale 导致测试与 UI 漂移)。 */
 		function formatResetTime(iso) {
 			if (!iso || typeof iso !== "string") return "—";
 			const d = new Date(iso);
-			return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+			if (Number.isNaN(d.getTime())) return iso;
+			const p = (n) => String(n).padStart(2, "0");
+			return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 		}
 		/** 单价显示: 整数去尾零(¥2 / ¥8), 小数保留 ≤3 位(¥0.2)。 */
 		function formatPrice(n, currency) {
 			const num = Number(n);
 			if (!Number.isFinite(num)) return currencySymbol(currency) + "?";
 			return currencySymbol(currency) + (num % 1 === 0 ? String(num) : String(Math.round(num * 1000) / 1000));
+		}
+		/** 每 1M Token 折算单价 = 该模型总价 / (该模型总 token / 1M)；总 token = 输入读(未命中+命中) + 输入写 + 输出。 */
+		function blendedPerMTokenPrice(costAmount, tok) {
+			const total = (tok?.uncachedInput ?? 0) + (tok?.cacheRead ?? 0) + (tok?.cacheWrite ?? 0) + (tok?.output ?? 0)
+			if (!(total > 0)) return null
+			return (Number(costAmount) * 1_000_000) / total
 		}
 		const normalizeProvider = (value) => String(value ?? "").trim().toLowerCase();
 		const providerMatchesAdapter = (adapter, provider) => {
@@ -486,6 +499,7 @@ window.__ModuleLoader__.load({
 		}
 		/** 与服务端 src/pricing.js 同一套 V4 峰谷表; 客户端按每笔 legs[].t 计价。 */
 		const V4_CUTOFF_MS = 1786896000000;
+		const WEEKEND_OFFPEAK_CUTOFF_MS = 1787414400000; // 2026-08-23T00:00:00+08:00（含）起周末全天谷价
 		const PINNED_V4_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"];
 		const V4_CNY = {
 			"deepseek-v4-flash": { listed: { cacheHit: 0.02, cacheMiss: 1, output: 2 }, peak: { cacheHit: 0.10, cacheMiss: 3.0, output: 9.0 }, offPeak: { cacheHit: 0.05, cacheMiss: 1.5, output: 4.5 } },
@@ -542,54 +556,114 @@ window.__ModuleLoader__.load({
 		}
 		function snapshotModelPrice(p) {
 			const base = { cacheHit: Number(p?.cacheHit), cacheMiss: Number(p?.cacheMiss), output: Number(p?.output) };
-			if (hasTariffTiers(p)) return { ...base, peak: cloneRate(p.peak), offPeak: cloneRate(p.offPeak) };
-			return base;
+			const next = hasTariffTiers(p) ? { ...base, peak: cloneRate(p.peak), offPeak: cloneRate(p.offPeak) } : base;
+			if (Array.isArray(p?.schedules) && p.schedules.length > 0) next.schedules = p.schedules;
+			return next;
+		}
+		function cloneSchedule(schedules) {
+			return (Array.isArray(schedules) ? schedules : []).map((seg) => ({
+				...seg,
+				price: seg?.price && typeof seg.price === "object" ? { ...seg.price } : seg?.price,
+			}));
 		}
 		function hydrateModelPrice(model, rates, currency) {
+			const schedules = Array.isArray(rates?.schedules) && rates.schedules.length > 0 ? cloneSchedule(rates.schedules) : undefined;
+			let next;
 			if (hasTariffTiers(rates)) {
-				return { ...cloneRate(rates.peak), peak: cloneRate(rates.peak), offPeak: cloneRate(rates.offPeak) };
-			}
-			if (PINNED_V4_MODELS.includes(model)) {
+				next = { ...cloneRate(rates.peak), peak: cloneRate(rates.peak), offPeak: cloneRate(rates.offPeak) };
+			} else if (PINNED_V4_MODELS.includes(model) && !schedules) {
 				const table = v4TableFor(currency)?.[model];
-				if (table) return v4SettingsFromTable(table);
+				next = table ? v4SettingsFromTable(table) : { cacheHit: Number(rates?.cacheHit ?? 0), cacheMiss: Number(rates?.cacheMiss ?? 0), output: Number(rates?.output ?? 0) };
+			} else {
+				next = { cacheHit: Number(rates?.cacheHit ?? 0), cacheMiss: Number(rates?.cacheMiss ?? 0), output: Number(rates?.output ?? 0) };
 			}
-			return { cacheHit: Number(rates?.cacheHit ?? 0), cacheMiss: Number(rates?.cacheMiss ?? 0), output: Number(rates?.output ?? 0) };
+			if (schedules) next.schedules = schedules;
+			return next;
 		}
 		function hydratePrices(prices, currency) {
 			const next = {};
 			for (const [model, rates] of Object.entries(prices || {})) next[model] = hydrateModelPrice(model, rates, currency);
 			return next;
 		}
+		/** 与服务端 src/pricing.js 保持一致：08-23 00:00（北京）起周末全天谷价，之前周末仍按工作日峰谷。 */
 		function isPeakBeijing(timestamp) {
 			const beijing = new Date(Number(timestamp) + 8 * 3600 * 1000);
 			const hour = beijing.getUTCHours();
 			const dow = beijing.getUTCDay();
-			if (dow === 0 || dow === 6) return false;
+			const weekend = dow === 0 || dow === 6;
+			if (weekend && Number(timestamp) >= WEEKEND_OFFPEAK_CUTOFF_MS) return false;
 			return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18);
 		}
 		/** 当前北京时间峰谷时段; 与 V4 计价时段保持一致。 */
 		function currentTariffPeriod(timestamp = Date.now()) {
 			return isPeakBeijing(timestamp) ? "peak" : "offPeak";
 		}
-		function resolveClientPrice(cfg, model, timestamp) {
+		function parseScheduleBound(value) {
+			if (value === null || value === undefined || value === "") return null;
+			if (typeof value === "number" && Number.isFinite(value)) return value;
+			const t = Date.parse(String(value));
+			return Number.isNaN(t) ? null : t;
+		}
+		/** 与服务端 scheduleAt 相同: 半开区间 [from, to), 多段命中取 from 最大。 */
+		function scheduleAt(schedules, timestamp) {
+			let best = null;
+			for (const seg of schedules ?? []) {
+				const from = parseScheduleBound(seg?.from);
+				const to = parseScheduleBound(seg?.to);
+				if (from !== null && timestamp < from) continue;
+				if (to !== null && timestamp >= to) continue;
+				if (best === null) { best = { from, price: seg?.price }; continue; }
+				if (from === null) continue;
+				if (best.from === null || from > best.from) best = { from, price: seg?.price };
+			}
+			return best?.price;
+		}
+		function effectiveRateAt(price, timestamp) {
+			const seg = scheduleAt(price?.schedules, timestamp);
+			const base = seg ?? price;
+			if (hasTariffTiers(base)) return cloneRate(isPeakBeijing(timestamp) ? base.peak : base.offPeak);
+			return isFiniteRate(base) ? cloneRate(base) : null;
+		}
+		function providerPriceCandidates(provider) {
+			const keys = [];
+			if (provider) {
+				keys.push(provider);
+				const base = provider.replace(/-\d+$/, "");
+				if (base !== provider) keys.push(base);
+			}
+			return keys;
+		}
+		function resolveClientPrice(cfg, model, timestamp = Date.now(), providerId) {
 			const currency = normalizePricingCurrency(cfg.currency);
 			const table = v4TableFor(currency)?.[model];
-			const configured = cfg.prices?.[model];
-			if (hasTariffTiers(configured)) {
-				if (table && timestamp < V4_CUTOFF_MS) return table.listed;
-				return cloneRate(isPeakBeijing(timestamp) ? configured.peak : configured.offPeak);
+			const provider = String(providerId ?? "").trim().toLowerCase();
+			if (provider) {
+				const key = providerPriceCandidates(provider).find((candidate) => cfg.providerPrices?.[candidate]?.[model] != null);
+				const providerLevel = key ? cfg.providerPrices[key][model] : null;
+				if (providerLevel != null) {
+					const resolved = effectiveRateAt(providerLevel, timestamp);
+					if (resolved) return resolved;
+				}
 			}
-			if (isFiniteRate(configured) && !(table && PINNED_V4_MODELS.includes(model))) {
-				return cloneRate(configured);
+			const configured = cfg.prices?.[model];
+			const scheduled = configured ? scheduleAt(configured.schedules, timestamp) : null;
+			const effective = scheduled ?? configured;
+			const customTiers = hasTariffTiers(effective) ? effective : null;
+			if (customTiers) {
+				if (!scheduled && table && timestamp < V4_CUTOFF_MS) return table.listed;
+				return cloneRate(isPeakBeijing(timestamp) ? customTiers.peak : customTiers.offPeak);
+			}
+			if (isFiniteRate(effective) && !(!scheduled && table && PINNED_V4_MODELS.includes(model))) {
+				return cloneRate(effective);
 			}
 			if (table) {
 				if (timestamp < V4_CUTOFF_MS) return table.listed;
 				return isPeakBeijing(timestamp) ? table.peak : table.offPeak;
 			}
-			return configured ?? cfg.defaultPrices ?? { cacheHit: 0, cacheMiss: 0, output: 0 };
+			return effective ?? cfg.defaultPrices ?? { cacheHit: 0, cacheMiss: 0, output: 0 };
 		}
 		function priceLeg(cfg, leg) {
-			const p = resolveClientPrice(cfg, leg.model, Number(leg.t) || 0);
+			const p = resolveClientPrice(cfg, leg.model, Number(leg.t) || 0, leg.provider);
 			return ((Number(leg.uncachedInput) + Number(leg.cacheWrite)) * Number(p.cacheMiss ?? 0)
 				+ Number(leg.cacheRead) * Number(p.cacheHit ?? 0)
 				+ Number(leg.output) * Number(p.output ?? 0)) / 1e6;
@@ -600,11 +674,12 @@ window.__ModuleLoader__.load({
 			const cfg = {
 				currency,
 				prices: payload?.prices,
+				providerPrices: payload?.providerPrices,
 				defaultPrices: payload?.defaultPrices
 			};
 			const legs = Array.isArray(cost?.legs) ? cost.legs : [];
 			if (!cost) {
-				return { cost: 0, costByModel: {}, models: [], tokens: undefined, currency, legs: [] };
+				return { cost: 0, costByModel: {}, models: [], tokens: undefined, tokensByModel: cost?.tokensByModel, currency, legs: [] };
 			}
 			if (legs.length === 0) {
 				return {
@@ -612,6 +687,7 @@ window.__ModuleLoader__.load({
 					costByModel: cost.costByModel ?? {},
 					models: cost.models ?? [],
 					tokens: cost.tokens,
+					tokensByModel: cost.tokensByModel,
 					currency: cost.currency ?? currency,
 					legs
 				};
@@ -628,6 +704,7 @@ window.__ModuleLoader__.load({
 				costByModel,
 				models: cost.models ?? [],
 				tokens: cost.tokens,
+				tokensByModel: cost.tokensByModel,
 				currency,
 				legs
 			};
@@ -908,6 +985,12 @@ window.__ModuleLoader__.load({
 			"settings.showPopoverHint": "悬停底部读数时显示明细。",
 			"settings.showTps": "实时 TPS",
 			"settings.showTpsHint": "显示流式输出的实时生成速度。",
+			"settings.showSessionId": "会话 ID 读数",
+			"settings.showSessionIdHint": "在剩余余额前显示当前会话 ID；点击可复制完整值。",
+			"session.idTooltip": "会话 ID：{id}\n点击复制",
+			"session.copied": "已复制 ✓",
+			"settings.pricePerMToken": "胶囊中展示 ¥/M tokens",
+			"settings.pricePerMTokenHint": "在本会话消耗列表中，每个模型显示每 1M tokens 单价。",
 			"settings.quotaMode": "额度查询模式",
 			"settings.quotaMode.follow": "跟随当前模型供应商",
 			"settings.quotaMode.custom": "固定展示一个额度源",
@@ -963,6 +1046,15 @@ window.__ModuleLoader__.load({
 			"settings.directCredential": "凭证",
 			"settings.cookieCredentialPlaceholder": "输入 Cookie",
 			"settings.directCredentialConfigured": "已设置",
+			"settings.tokenrhythm.title": "基元律动钱包余额",
+			"settings.tokenrhythm.cookie": "登录 Cookie",
+			"settings.tokenrhythm.cookieHint": "选填。支持粘贴完整 tr_session=... 或直接粘贴 sess_...；点击「测试并读取字段」成功后自动保存，或点击「保存」一并保存。",
+			"settings.tokenrhythm.save": "保存 Cookie",
+			"settings.tokenrhythm.query": "获取余额",
+			"settings.tokenrhythm.notConfigured": "尚未填写/配置 Cookie，请先填写后再测试。",
+			"settings.tokenrhythm.configured": "Cookie 已保存；填写新值可覆盖，点击「测试并读取字段」或「保存」生效。",
+			"settings.tokenrhythm.testing": "查询中…",
+			"settings.tokenrhythm.error": "查询失败：{error}",
 			"settings.directCredentialPlaceholder": "输入 Token 或凭证",
 			"settings.authHeader": "鉴权请求头名称",
 			"settings.authParam": "鉴权参数名称",
@@ -1092,6 +1184,16 @@ window.__ModuleLoader__.load({
 			"settings.addFillingPeak": "当前填写：高峰价",
 			"settings.peakMultiplier": "峰谷倍率",
 			"settings.addModelHint": "三个价格是高峰价。倍率为 1 时无峰谷；否则低谷 = 高峰 × 倍率（官方 V4 为 0.5）。",
+			"settings.providerPrices": "渠道级单价 (providerPrices)",
+			"settings.providerPricesHint": "按 DSH 供应商 ID 覆盖模型单价。每个渠道是一个 JSON 对象：{ 模型: { cacheHit, cacheMiss, output, peak?, offPeak?, schedules? } }。",
+			"settings.providerPricesEmpty": "还没有渠道级单价配置。",
+			"settings.addProvider": "添加渠道",
+			"settings.removeProvider": "移除该渠道",
+			"settings.providerPricesApply": "应用 JSON",
+			"settings.schedules": "时间分段 (schedules)",
+			"settings.schedulesHint": "按模型编辑分段价格 JSON；from/to 支持 ISO 时间或毫秒，区间为半开 [from, to)。",
+			"settings.removeSchedules": "移除时间分段",
+			"settings.invalidJson": "JSON 解析失败：{error}",
 			"settings.enableTiers": "按 0.5 启用峰谷",
 			"settings.disableTiers": "改为固定价",
 			"settings.btnAdd": "添加",
@@ -1210,6 +1312,12 @@ window.__ModuleLoader__.load({
 			"settings.showPopoverHint": "Details when hovering the bottom readout.",
 			"settings.showTps": "Live TPS",
 			"settings.showTpsHint": "Show the live streaming generation speed.",
+			"settings.showSessionId": "Session ID readout",
+			"settings.showSessionIdHint": "Show the current session id before the balance readout; click to copy the full value.",
+			"session.idTooltip": "Session ID: {id}\nClick to copy",
+			"session.copied": "Copied ✓",
+			"settings.pricePerMToken": "Show ¥/M tokens in capsule",
+			"settings.pricePerMTokenHint": "Show each model's price per 1M tokens in the session cost list.",
 			"settings.quotaMode": "Quota query mode",
 			"settings.quotaMode.follow": "Follow current model provider",
 			"settings.quotaMode.custom": "Always show one quota source",
@@ -1265,6 +1373,15 @@ window.__ModuleLoader__.load({
 			"settings.directCredential": "Credential",
 			"settings.cookieCredentialPlaceholder": "Enter cookie",
 			"settings.directCredentialConfigured": "Configured",
+			"settings.tokenrhythm.title": "TokenRhythm wallet balance",
+			"settings.tokenrhythm.cookie": "Login cookie",
+			"settings.tokenrhythm.cookieHint": "Optional. Accepts the full tr_session=... or a bare sess_... value; it is saved automatically on a successful test, or when you click Save.",
+			"settings.tokenrhythm.save": "Save cookie",
+			"settings.tokenrhythm.query": "Fetch balance",
+			"settings.tokenrhythm.notConfigured": "No cookie configured yet; fill it in before testing.",
+			"settings.tokenrhythm.configured": "Cookie saved; enter a new value to overwrite (applies on test or save).",
+			"settings.tokenrhythm.testing": "Querying…",
+			"settings.tokenrhythm.error": "Query failed: {error}",
 			"settings.directCredentialPlaceholder": "Enter token or credential",
 			"settings.authHeader": "Authentication header",
 			"settings.authParam": "Authentication parameter",
@@ -1393,6 +1510,16 @@ window.__ModuleLoader__.load({
 			"settings.addFillingPeak": "Currently filling: peak",
 			"settings.peakMultiplier": "Off-peak multiplier",
 			"settings.addModelHint": "The three prices are peak rates. Multiplier 1 means no peak/off-peak split; otherwise off-peak = peak × multiplier (official V4 is 0.5).",
+			"settings.providerPrices": "Provider-level prices (providerPrices)",
+			"settings.providerPricesHint": "Override model prices per DSH provider ID. Each channel is a JSON object: { model: { cacheHit, cacheMiss, output, peak?, offPeak?, schedules? } }.",
+			"settings.providerPricesEmpty": "No provider-level prices yet.",
+			"settings.addProvider": "Add provider",
+			"settings.removeProvider": "Remove this provider",
+			"settings.providerPricesApply": "Apply JSON",
+			"settings.schedules": "Time segments (schedules)",
+			"settings.schedulesHint": "Edit per-model schedule JSON. from/to accept ISO strings or millis; the interval is half-open [from, to).",
+			"settings.removeSchedules": "Remove schedules",
+			"settings.invalidJson": "Invalid JSON: {error}",
 			"settings.enableTiers": "Enable peak/off-peak at 0.5",
 			"settings.disableTiers": "Use flat rate",
 			"settings.btnAdd": "Add",
@@ -1449,6 +1576,8 @@ window.__ModuleLoader__.load({
 			showCapsule: true,
 			showPopover: true,
 			showTps: true,
+			showPricePerMToken: false,
+			showSessionId: true,
 			provider: "deepseek",
 			currency: "CNY",
 			warningThreshold: 10,
@@ -1462,6 +1591,7 @@ window.__ModuleLoader__.load({
 			opencodeApiKey: "",
 			opencodeBaseUrl: "https://opencode.ai/zen/go/v1/usage",
 			prices: { ...DEFAULT_PRICES },
+			providerPrices: {},
 			defaultPrices: officialDefaultPrices("CNY"),
 			quotaSources: [],
 			providerQuotas: [],
@@ -1493,6 +1623,7 @@ window.__ModuleLoader__.load({
 				`    showCapsule: ${config.showCapsule !== false}`,
 				`    showPopover: ${config.showPopover !== false}`,
 				`    showTps: ${config.showTps !== false}`,
+				`    showSessionId: ${config.showSessionId !== false}`,
 				...(providerQuotas.length > 0
 					? [`    providerQuotas: ${JSON.stringify(providerQuotas)}`]
 					: []),
@@ -1502,12 +1633,27 @@ window.__ModuleLoader__.load({
 				`    clientPollIntervalMs: ${config.clientPollIntervalMs}`,
 				`    currency: ${config.currency}`
 			];
+			const rateString = (r) => `{ cacheHit: ${r.cacheHit}, cacheMiss: ${r.cacheMiss}, output: ${r.output} }`;
+			const priceString = (p) => {
+				let out = `{ cacheHit: ${p.cacheHit}, cacheMiss: ${p.cacheMiss}, output: ${p.output}`;
+				if (hasTariffTiers(p)) out += `, peak: ${rateString(p.peak)}, offPeak: ${rateString(p.offPeak)}`;
+				if (Array.isArray(p.schedules) && p.schedules.length > 0) out += `, schedules: ${JSON.stringify(p.schedules)}`;
+				return out + " }";
+			};
 			lines.push("    prices:");
 			for (const [m, p] of Object.entries(config.prices || {})) {
-				if (hasTariffTiers(p)) {
-					lines.push(`      ${m}: { cacheHit: ${p.cacheHit}, cacheMiss: ${p.cacheMiss}, output: ${p.output}, peak: { cacheHit: ${p.peak.cacheHit}, cacheMiss: ${p.peak.cacheMiss}, output: ${p.peak.output} }, offPeak: { cacheHit: ${p.offPeak.cacheHit}, cacheMiss: ${p.offPeak.cacheMiss}, output: ${p.offPeak.output} } }`);
-				} else {
-					lines.push(`      ${m}: { cacheHit: ${p.cacheHit}, cacheMiss: ${p.cacheMiss}, output: ${p.output} }`);
+				lines.push(`      ${m}: ${priceString(p)}`);
+			}
+			const providerPrices = config.providerPrices && typeof config.providerPrices === "object" ? config.providerPrices : {};
+			const providerIds = Object.keys(providerPrices);
+			if (providerIds.length > 0) {
+				lines.push("    providerPrices:");
+				for (const providerId of providerIds) {
+					const models = providerPrices[providerId] && typeof providerPrices[providerId] === "object" ? providerPrices[providerId] : {};
+					lines.push(`      ${providerId}:`);
+					for (const [model, p] of Object.entries(models)) {
+						lines.push(`        ${model}: ${priceString(p)}`);
+					}
 				}
 			}
 			return lines.join("\n");
@@ -1649,6 +1795,8 @@ window.__ModuleLoader__.load({
 				showCapsule: c.showCapsule !== false,
 				showPopover: c.showPopover !== false,
 				showTps: c.showTps !== false,
+				showPricePerMToken: c.showPricePerMToken === true,
+				showSessionId: c.showSessionId !== false,
 				provider: typeof c.provider === "string" && c.provider.trim() ? c.provider.trim() : "deepseek",
 				currency: selectedCurrency,
 				warningThreshold: c.warningThreshold ?? 10,
@@ -1662,6 +1810,7 @@ window.__ModuleLoader__.load({
 				opencodeApiKey: "",
 				opencodeBaseUrl: c.opencodeBaseUrl || "https://opencode.ai/zen/go/v1/usage",
 				prices: hydratePrices(loadedPrices, selectedCurrency),
+				providerPrices: c.providerPrices && typeof c.providerPrices === "object" ? cloneSettings(c.providerPrices) : {},
 				defaultPrices: c.defaultPrices ?? officialDefaultPrices(selectedCurrency),
 				quotaSources: Array.isArray(c.quotaSources) ? c.quotaSources.map((s) => cloneSettings(s)) : [],
 				providerQuotas: Array.isArray(c.providerQuotas) ? c.providerQuotas.map((binding) => cloneSettings(binding)) : [],
@@ -1672,10 +1821,10 @@ window.__ModuleLoader__.load({
 
 		const CARD_IDS = ["display", "quota", "thresholds", "pricing"];
 		const CARD_KEYS = {
-			display: ["showDock", "dockLayout", "showCapsule", "showPopover", "showTps"],
+			display: ["showDock", "dockLayout", "showCapsule", "showPopover", "showTps", "showSessionId", "showPricePerMToken"],
 			quota: ["providerQuotas"],
 			thresholds: ["warningThreshold", "dangerThreshold", "refreshIntervalMs", "clientPollIntervalMs", "timeoutMs"],
-			pricing: ["currency", "prices", "defaultPrices"]
+			pricing: ["currency", "prices", "defaultPrices", "providerPrices"]
 		};
 		const SECRET_FIELDS = ["apiKey", "opencodeApiKey"];
 		const SETTINGS_DRAFT_PREFIX = "dsh-credits.settingsDraft.";
@@ -1709,7 +1858,22 @@ window.__ModuleLoader__.load({
 				? (provider?.quotaSupported === true ? "template" : "custom")
 				: (["template", "provider", "custom"].includes(raw.sourceType) ? raw.sourceType : "custom");
 			const next = { providerId, enabled, sourceType };
-			if (sourceType === "template") next.templateId = String(raw.templateId || provider?.templateId || "");
+			if (sourceType === "template") {
+				next.templateId = String(raw.templateId || provider?.templateId || "");
+				const req = raw.source?.request ?? {};
+				const authRef = String(req.authRef ?? "").trim();
+				const authValue = String(req.authValue ?? "").trim();
+				next.templateCredential = (req.credentialConfigured === true || authRef !== "" || authValue !== "") ? 1 : 0;
+				// 模板凭证不再只看“是否已配置”：换 Cookie（含旧值→新值）必须也能判定 dirty 并保留草稿，
+				// 否则 patchCard 会把 providerQuotas 当场丢弃，测试/保存仍沿用旧 Cookie。
+				const credentialSeed = authRef + "\u0000" + authValue;
+				let credentialHash = 2166136261;
+				for (let i = 0; i < credentialSeed.length; i += 1) {
+					credentialHash ^= credentialSeed.charCodeAt(i);
+					credentialHash = Math.imul(credentialHash, 16777619);
+				}
+				next.templateCredentialFingerprint = String((credentialHash >>> 0).toString(16));
+			}
 			if (sourceType === "provider") next.sourceProviderId = String(raw.sourceProviderId || "");
 			if (sourceType === "custom" && !(implicit && !enabled)) next.source = raw.source ?? null;
 			return stableComparable(next);
@@ -1741,6 +1905,7 @@ window.__ModuleLoader__.load({
 				return JSON.stringify(pa) === JSON.stringify(pb);
 			}
 			if (field === "providerQuotas") return providerQuotaListsEqual(a, b, context?.dshProviders);
+			if (field === "providerPrices") return JSON.stringify(stableComparable(a ?? {})) === JSON.stringify(stableComparable(b ?? {}));
 			if (field === "defaultPrices") return JSON.stringify(a || {}) === JSON.stringify(b || {});
 			if ((a && typeof a === "object") || (b && typeof b === "object")) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 			if (typeof a === "boolean" || typeof b === "boolean") return Boolean(a) === Boolean(b);
@@ -2022,6 +2187,10 @@ window.__ModuleLoader__.load({
 			const [newModelMiss, setNewModelMiss] = react.useState(1.0);
 			const [newModelOut, setNewModelOut] = react.useState(2.0);
 			const [newModelMultiplier, setNewModelMultiplier] = react.useState(1);
+			const [newProviderId, setNewProviderId] = react.useState("");
+			const [providerPriceDrafts, setProviderPriceDrafts] = react.useState({});
+			const [scheduleDrafts, setScheduleDrafts] = react.useState({});
+			const [templateCookieDrafts, setTemplateCookieDrafts] = react.useState({});
 			const [customSourceDraft, setCustomSourceDraft] = react.useState(null);
 			const [editingSourceId, setEditingSourceId] = react.useState(null);
 			const [editingProviderId, setEditingProviderId] = react.useState(null);
@@ -2168,6 +2337,8 @@ window.__ModuleLoader__.load({
 						payload.showCapsule = merged.showCapsule !== false;
 						payload.showPopover = merged.showPopover !== false;
 						payload.showTps = merged.showTps !== false;
+						payload.showSessionId = merged.showSessionId !== false;
+						payload.showPricePerMToken = merged.showPricePerMToken === true;
 					} else if (cardId === "quota") {
 						payload.providerQuotas = Array.isArray(merged.providerQuotas)
 							? merged.providerQuotas.filter((binding) => binding.implicit !== true || binding._edited === true).map((binding) => {
@@ -2188,6 +2359,7 @@ window.__ModuleLoader__.load({
 					} else if (cardId === "pricing") {
 						payload.currency = String(merged.currency ?? "CNY").trim().toUpperCase();
 						payload.prices = { ...(merged.prices || {}) };
+						payload.providerPrices = merged.providerPrices && typeof merged.providerPrices === "object" ? { ...merged.providerPrices } : {};
 						payload.defaultPrices = { ...(merged.defaultPrices || officialDefaultPrices(merged.currency)) };
 					}
 					const res = await fetch("/query-credits/config", {
@@ -2214,11 +2386,14 @@ window.__ModuleLoader__.load({
 						showToast(t("settings.savedToast"));
 						void balanceStore.forceRefresh();
 						void spendStore.refresh();
+						return true;
 					} else {
 						setFailedCard(cardId);
+						return false;
 					}
 				} catch (_err) {
 					setFailedCard(cardId);
+					return false;
 				} finally {
 					setSavingCard(null);
 				}
@@ -2312,7 +2487,12 @@ window.__ModuleLoader__.load({
 					const target = dshProviderDirectory.find((item) => item.id === binding.sourceProviderId);
 					return t("settings.providerQuota.reuseSummary", { name: target?.name || binding.sourceProviderId || "—" });
 				}
-				if (binding.sourceType === "custom") return t("settings.providerQuota.custom");
+				if (binding.sourceType === "custom") {
+					const boundTemplateId = binding.source?.template || binding.templateId;
+					const boundTemplate = boundTemplateId ? quotaTemplates.find((item) => item.id === boundTemplateId) : null;
+					if (boundTemplate) return t("settings.providerQuota.templateSummary", { template: boundTemplate.name || boundTemplateId || "—" });
+					return t("settings.providerQuota.custom");
+				}
 				if (binding.sourceType === "auto" && provider.quotaSupported !== true) return t("settings.providerQuota.custom");
 				const templateId = binding.sourceType === "auto"
 					? (provider.templateId || binding.templateId)
@@ -2355,10 +2535,91 @@ window.__ModuleLoader__.load({
 							? t("settings.providerQuota.testParsed", { count: details.length, details: details.join(" · ") })
 							: t("settings.providerQuota.testFields", { count: fields.length }),
 					});
+					return data;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					setSourceTest({ state: "error", fields: [], message, diagnostics: null, providerId: provider.id });
 					showToast(t("settings.providerQuota.testFailedToast", { error: message }), "error", 5000);
+			}
+			};
+
+			const templateSourceOf = (templateId) => {
+				const template = quotaTemplates.find((item) => item.id === templateId);
+				if (template?.source) return cloneSettings(template.source);
+				if (templateId === "tokenrhythm") {
+					return {
+						id: "tokenrhythm-balance",
+						name: "基元律动钱包余额",
+						kind: "metric",
+						template: "tokenrhythm",
+						providerIds: [templateId],
+						providerPatterns: [],
+						enabled: true,
+						request: { method: "GET", url: "https://tokenrhythm.studio/api/wallet/summary", dshProvider: "", credentialMode: "direct", authRef: "", authValue: "", credentialConfigured: false, authStyle: "cookie", authHeader: "Authorization", authParam: "api_key", headers: {}, bodyType: "none", body: "" },
+						response: {
+							metrics: [
+								{ key: "balance", label: "可用余额", calculation: "direct", valuePath: "$.data.availableBalanceCny", unit: "CNY", aggregate: "value", scale: 1, offset: 0, resetsAtPath: "" },
+							],
+						},
+					};
+				}
+				return null;
+			};
+			const templateCookieDraftFor = (providerId) => String(templateCookieDrafts[providerId] ?? "").trim();
+			/** 基元律动 Cookie 归一化：直接粘贴 sess_... 会话值时自动补全 tr_session= 键名。 */
+			const normalizeTrCookie = (value) => {
+				const raw = String(value ?? "").trim();
+				return /^sess_[A-Za-z0-9_-]+$/.test(raw) ? `tr_session=${raw}` : raw;
+			};
+			const templateCredentialConfigured = (provider) => {
+				const binding = providerBindingFor(provider.id);
+				return Boolean(binding?.source?.request?.credentialConfigured)
+					|| Boolean(binding?.source?.request?.authValue);
+			};
+			const templateSourceWithDraft = (templateId, providerId, authValue) => {
+				const source = templateSourceOf(templateId);
+				if (!source) return null;
+				return {
+					...source,
+					template: templateId,
+					providerIds: [providerId],
+					providerPatterns: [],
+					request: {
+						...(source.request ?? {}),
+						credentialMode: "direct",
+						dshProvider: "",
+						authStyle: String(source.request?.authStyle || "cookie"),
+						// authRef 留空：由服务端按 provider:<providerId> 生成隔离引用，多账户互不覆盖。
+						authRef: "",
+						authValue: normalizeTrCookie(authValue),
+						authHeader: source.request?.authHeader || "Authorization",
+						authParam: source.request?.authParam || "api_key",
+						headers: { ...(source.request?.headers ?? {}) },
+					},
+				};
+			};
+			/** 模板模式测试/读取字段：复用通用测试按钮；测试成功且本行填了 Cookie 时把整张额度卡片持久化。 */
+			const runTemplateTest = async (provider, binding, templateId) => {
+				const draft = templateCookieDraftFor(provider.id);
+				const resolvedTemplateId = templateId || binding.templateId || provider.templateId || quotaTemplates[0]?.id || "";
+				const testBinding = {
+					...cloneSettings(binding),
+					sourceType: "template",
+					templateId: resolvedTemplateId,
+				};
+				// 测试请求必须使用输入框里刚填写的 Cookie，而不是 binding 中可能残留的旧凭证。
+				if (draft) {
+					const draftSource = templateSourceWithDraft(resolvedTemplateId, provider.id, draft);
+					if (draftSource) testBinding.source = draftSource;
+				}
+				const ok = await testProviderBinding(provider, testBinding);
+				if (ok && draft) {
+					await saveCard("quota");
+					setTemplateCookieDrafts((d) => {
+						const next = { ...d };
+						delete next[provider.id];
+						return next;
+					});
 				}
 			};
 
@@ -2510,6 +2771,7 @@ window.__ModuleLoader__.load({
 					const message = error instanceof Error ? error.message : String(error);
 					setSourceTest({ state: "error", fields: [], message, diagnostics: null });
 					showToast(t("settings.providerQuota.testFailedToast", { error: message }), "error", 5000);
+					return null;
 				}
 			};
 			const saveCustomSource = async () => {
@@ -2579,7 +2841,9 @@ window.__ModuleLoader__.load({
 					displayCheck("showDock", "settings.showDock", "settings.showDockHint"),
 					displayCheck("showCapsule", "settings.showCapsule", "settings.showCapsuleHint"),
 					displayCheck("showPopover", "settings.showPopover", "settings.showPopoverHint"),
-					displayCheck("showTps", "settings.showTps", "settings.showTpsHint")
+					displayCheck("showTps", "settings.showTps", "settings.showTpsHint"),
+					displayCheck("showSessionId", "settings.showSessionId", "settings.showSessionIdHint"),
+					displayCheck("showPricePerMToken", "settings.pricePerMToken", "settings.pricePerMTokenHint")
 				]),
 				react.createElement(FieldGrid, { key: "display_bar" }, [
 					react.createElement(FieldRow, {
@@ -2679,6 +2943,7 @@ window.__ModuleLoader__.load({
 							? (provider.templateId || binding.templateId)
 							: (binding.templateId || provider.templateId);
 						const selectedTemplate = quotaTemplates.find((item) => item.id === selectedTemplateId);
+						const templateNeedsCookie = selectedTemplate?.source?.request?.authStyle === "cookie";
 						const credentialChoice = source.request?.credentialMode === "direct" ? "__value" : source.request?.credentialMode === "none" ? "__none" : requestDshProvider
 							? requestDshProvider
 							: ((source.request?.authValue || source.request?.credentialConfigured) ? "__value" : (source.request?.authStyle === "none" ? "__none" : "__ref"));
@@ -2746,6 +3011,29 @@ window.__ModuleLoader__.load({
 										}, ["subscription", "balance"].flatMap((category) => quotaTemplates.filter((item) => item.category === category).map((template) =>
 											react.createElement("option", { value: template.id, key: template.id }, t("settings.template." + category) + " · " + template.name)
 									)))
+								)
+							]) : null,
+							currentSourceType === "template" && templateNeedsCookie ? react.createElement(FieldGrid, { key: "template_credential_grid" }, [
+								react.createElement(FieldRow, { t, key: "cookie", wide: true, label: t("settings.tokenrhythm.cookie"), hint: t("settings.tokenrhythm.cookieHint"), disabled: savingCard === "quota" },
+									react.createElement("div", { className: "dshqb_secret_input" }, [
+										react.createElement("input", {
+											className: "dshqb_input",
+											key: "input",
+											type: "password",
+											autoComplete: "new-password",
+											value: templateCookieDrafts[provider.id] ?? "",
+											placeholder: templateCredentialConfigured(provider) ? "••••••••" : t("settings.directCredentialPlaceholder"),
+											onChange: (e) => {
+											const value = e.target.value;
+											setTemplateCookieDrafts((d) => ({ ...d, [provider.id]: value }));
+											if (selectedTemplate?.id) {
+												const src = templateSourceWithDraft(selectedTemplate.id, provider.id, value);
+												if (src) updateProviderBinding(provider, { enabled: true, sourceType: "template", templateId: selectedTemplate.id, source: src });
+											}
+										}
+										}),
+										templateCredentialConfigured(provider) ? react.createElement("span", { className: "dshqb_secret_status", key: "status" }, t("settings.tokenrhythm.configured")) : null
+									])
 								)
 							]) : null,
 							currentSourceType === "provider" ? react.createElement(FieldGrid, { key: "reuse_grid" }, [
@@ -2885,13 +3173,12 @@ window.__ModuleLoader__.load({
 								selectedTemplate?.autoEnable === false && selectedTemplate.description
 									? react.createElement("div", { className: "dshqb_source_test dshqb_source_test_warn", key: "template_notice" }, selectedTemplate.description)
 									: null,
+								templateNeedsCookie && !templateCredentialConfigured(provider) && !templateCookieDraftFor(provider.id)
+									? react.createElement("div", { className: "dshqb_form_hint", key: "cookie_notice" }, t("settings.tokenrhythm.notConfigured"))
+									: null,
 								react.createElement("div", { className: "dshqb_source_actions", key: "actions" }, react.createElement("button", {
-									type: "button", className: "dshqb_btn dshqb_btn_outline", disabled: currentSourceType === "provider" || testState.state === "testing" || savingCard === "quota",
-									onClick: () => { void testProviderBinding(provider, {
-										...binding,
-										sourceType: binding.sourceType === "auto" && currentSourceType === "template" ? "auto" : currentSourceType,
-										templateId: binding.templateId || provider.templateId || quotaTemplates[0]?.id || "",
-									}); }
+									type: "button", className: "dshqb_btn dshqb_btn_outline", disabled: currentSourceType === "provider" || testState.state === "testing" || savingCard === "quota" || (templateNeedsCookie && !templateCookieDraftFor(provider.id) && !templateCredentialConfigured(provider)),
+									onClick: () => { void runTemplateTest(provider, binding, selectedTemplateId); }
 								}, t(testState.state === "testing" ? "settings.btnTesting" : "settings.btnTest"))),
 								testResult
 							]),
@@ -3103,6 +3390,48 @@ window.__ModuleLoader__.load({
 				});
 				setNewModelName("");
 			};
+			const providerPrices = view.providerPrices && typeof view.providerPrices === "object" ? view.providerPrices : {};
+			const patchProviderPrices = (nextProviderPrices) => patchCard("pricing", { providerPrices: nextProviderPrices });
+			const applyProviderPricesJson = (providerId, text) => {
+				try {
+					const parsed = text.trim() ? JSON.parse(text) : {};
+					if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("object required");
+					patchProviderPrices({ ...providerPrices, [providerId]: parsed });
+					setProviderPriceDrafts((d) => { const n = { ...d }; delete n[providerId]; return n; });
+					showToast(t("settings.savedToast"));
+				} catch (err) {
+					showToast(t("settings.invalidJson", { error: err instanceof Error ? err.message : String(err) }), "error", 5000);
+				}
+			};
+			const applyScheduleJson = (model, text) => {
+				try {
+					const parsed = text.trim() ? JSON.parse(text) : [];
+					if (!Array.isArray(parsed)) throw new Error("array required");
+					const current = view.prices?.[model] && typeof view.prices[model] === "object" ? view.prices[model] : {};
+					patchModelRates(model, { ...current, schedules: parsed });
+					setScheduleDrafts((d) => { const n = { ...d }; delete n[model]; return n; });
+					showToast(t("settings.savedToast"));
+				} catch (err) {
+					showToast(t("settings.invalidJson", { error: err instanceof Error ? err.message : String(err) }), "error", 5000);
+				}
+			};
+			const removeSchedule = (model) => {
+				const current = view.prices?.[model] && typeof view.prices[model] === "object" ? view.prices[model] : {};
+				const next = { ...current };
+				delete next.schedules;
+				patchModelRates(model, next);
+				setScheduleDrafts((d) => { const n = { ...d }; delete n[model]; return n; });
+			};
+			const addProviderPriceChannel = () => {
+				const providerId = newProviderId.trim();
+				if (!providerId) return;
+				if (providerPrices[providerId]) {
+					setNewProviderId("");
+					return;
+				}
+				patchProviderPrices({ ...providerPrices, [providerId]: {} });
+				setNewProviderId("");
+			};
 			const pricingCard = react.createElement(PluginCard, {
 				t,
 				title: t("settings.card.pricing"),
@@ -3303,6 +3632,57 @@ window.__ModuleLoader__.load({
 						}, t("settings.btnAdd"))
 					]),
 					react.createElement("div", { className: "dshqb_add_model_hint", key: "hint" }, t("settings.addModelHint"))
+				]),
+				react.createElement("div", { className: "dshqb_source_section", key: "provider_prices" }, [
+					react.createElement("div", { className: "dshqb_field", key: "field" }, [
+						react.createElement("div", { className: "dshqb_field_head", key: "head" }, [
+							react.createElement("span", { className: "dshqb_field_label", key: "label" }, t("settings.providerPrices"))
+						]),
+						react.createElement("span", { className: "dshqb_form_hint", key: "hint" }, t("settings.providerPricesHint")),
+						Object.keys(providerPrices).length === 0
+							? react.createElement("div", { className: "dshqb_provider_quota_empty", key: "empty" }, t("settings.providerPricesEmpty"))
+							: Object.entries(providerPrices).map(([providerId, models]) => {
+								const draft = providerPriceDrafts[providerId] ?? JSON.stringify(models ?? {}, null, 2);
+								return react.createElement("details", { className: "dshqb_source_advanced", key: providerId }, [
+									react.createElement("summary", { key: "sum" }, providerId),
+									react.createElement("textarea", {
+										className: "dshqb_input dshqb_textarea",
+										value: draft,
+										onChange: (e) => setProviderPriceDrafts((d) => ({ ...d, [providerId]: e.target.value })),
+										key: "ta"
+									}),
+									react.createElement("div", { className: "dshqb_source_actions", key: "actions" }, [
+										react.createElement("button", { type: "button", className: "dshqb_btn dshqb_btn_secondary", onClick: () => applyProviderPricesJson(providerId, draft), key: "apply" }, t("settings.providerPricesApply")),
+										react.createElement("button", { type: "button", className: "dshqb_btn dshqb_btn_outline", onClick: () => { const next = { ...providerPrices }; delete next[providerId]; patchProviderPrices(next); setProviderPriceDrafts((d) => { const n = { ...d }; delete n[providerId]; return n; }); }, key: "rm" }, t("settings.removeProvider"))
+									])
+								]);
+							}),
+						react.createElement("div", { className: "dshqb_add_model_row", key: "add_row" }, [
+							react.createElement("input", { type: "text", className: "dshqb_input", style: { flex: 2, minWidth: "140px" }, placeholder: t("settings.providerId"), value: newProviderId, onChange: (e) => setNewProviderId(e.target.value), key: "inp" }),
+							react.createElement("button", { type: "button", className: "dshqb_btn dshqb_btn_secondary", onClick: addProviderPriceChannel, key: "add" }, t("settings.addProvider"))
+						])
+					])
+				]),
+				react.createElement("div", { className: "dshqb_source_section", key: "schedules_section" }, [
+					react.createElement("div", { className: "dshqb_field", key: "field" }, [
+						react.createElement("div", { className: "dshqb_field_head", key: "head" }, [
+							react.createElement("span", { className: "dshqb_field_label", key: "label" }, t("settings.schedules"))
+						]),
+						react.createElement("span", { className: "dshqb_form_hint", key: "hint" }, t("settings.schedulesHint")),
+						Object.entries(view.prices || {}).map(([model, stored]) => {
+							const rates = hydrateModelPrice(model, stored, currency);
+							const schedules = Array.isArray(rates.schedules) ? rates.schedules : [];
+							const draft = scheduleDrafts[model] ?? JSON.stringify(schedules, null, 2);
+							return react.createElement("details", { className: "dshqb_source_advanced", key: model }, [
+								react.createElement("summary", { key: "sum" }, `${model} · ${schedules.length}`),
+								react.createElement("textarea", { className: "dshqb_input dshqb_textarea", value: draft, onChange: (e) => setScheduleDrafts((d) => ({ ...d, [model]: e.target.value })), key: "ta" }),
+								react.createElement("div", { className: "dshqb_source_actions", key: "actions" }, [
+									react.createElement("button", { type: "button", className: "dshqb_btn dshqb_btn_secondary", onClick: () => applyScheduleJson(model, draft), key: "apply" }, t("settings.providerPricesApply")),
+									schedules.length > 0 ? react.createElement("button", { type: "button", className: "dshqb_btn dshqb_btn_outline", onClick: () => removeSchedule(model), key: "rm" }, t("settings.removeSchedules")) : null
+								])
+							]);
+						})
+					])
 				])
 			]);
 
@@ -3492,6 +3872,16 @@ window.__ModuleLoader__.load({
 		 * 包含余额指示灯、本会话消耗、可选悬停双栏卡片与 V4 定价卡片。
 		 * 设置入口在官方设置页的「额度」卡片。
 		 */
+	/**
+	 * 会话 ID 截断显示: 去掉 "session-" 前缀后取前 8 位 (通常是 UUID 首段);
+	 * 完整值通过悬停提示与点击复制提供。
+	 */
+		function shortSessionId(sid) {
+			const text = String(sid ?? "");
+			const body = text.startsWith("session-") ? text.slice("session-".length) : text;
+			return (body || text).slice(0, 8);
+		}
+
 		function toLocalInput(ms) {
 			const d = new Date(ms);
 			if (Number.isNaN(d.getTime())) return "";
@@ -3499,7 +3889,7 @@ window.__ModuleLoader__.load({
 			return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
 		}
 
-		const SpendCapsule = react.memo(function SpendCapsule({ t }) {
+		const SpendCapsule = react.memo(function SpendCapsule({ t, config }) {
 			const snap = react.useSyncExternalStore(spendStore.subscribe, spendStore.getSnapshot, spendStore.getSnapshot);
 			const [open, setOpen] = react.useState(false);
 			const [pos, setPos] = react.useState(() => {
@@ -3566,7 +3956,8 @@ window.__ModuleLoader__.load({
 								onClick: () => {
 									if (id === "custom") {
 										const now = Date.now();
-										const from = snap.from || toLocalInput(now - (now % 86400000));
+										const localMidnight = (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })();
+										const from = snap.from || toLocalInput(localMidnight);
 										const to = snap.to || toLocalInput(now);
 										void spendStore.setRange("custom", from, to);
 									} else {
@@ -3603,12 +3994,16 @@ window.__ModuleLoader__.load({
 						: react.createElement("div", { key: "empty", className: "dshqb_card_sub" }, t("spend.empty")),
 					payload && payload.costByModel
 						? react.createElement("ul", { className: "dshqb_card_models", key: "models" },
-							Object.entries(payload.costByModel).map(([m, c]) =>
-								react.createElement("li", { key: m }, [
-									react.createElement("span", { key: "m" }, "• " + m),
-									react.createElement("span", { key: "c" }, formatMoney(c, payload.currency ?? "CNY"))
-								])
-							)
+							Object.entries(payload.costByModel).map(([m, c]) => {
+								const blended = blendedPerMTokenPrice(c, payload.tokensByModel?.[m])
+								const perM = config?.showPricePerMToken && blended !== null
+									? formatPrice(blended, payload?.currency ?? config?.currency ?? "CNY") + "/M"
+									: null
+								return react.createElement("li", { key: m }, [
+									react.createElement("span", { key: "m" }, "• " + (payload.providerByModel?.[m] ? payload.providerByModel[m] + "/" + m : m)),
+									react.createElement("span", { key: "c" }, formatMoney(c, payload.currency ?? "CNY") + (perM ? " · " + perM : ""))
+								]);
+							})
 						)
 						: null
 				])
@@ -3678,8 +4073,15 @@ window.__ModuleLoader__.load({
 			const showCapsule = payload?.showCapsule !== false;
 			const showPopover = payload?.showPopover !== false;
 			const showTps = payload?.showTps !== false;
+		const showPricePerMToken = payload?.showPricePerMToken === true;
 			const cost = priceSession(rawCost, payload);
 			const rootRef = react.useRef(null);
+			// 会话 ID 读数的复制反馈: 复制成功后短暂切换文案, 到期回落。
+			const [sidCopied, setSidCopied] = react.useState(false);
+			const sidCopyTimer = react.useRef(null);
+			react.useEffect(() => () => {
+				if (sidCopyTimer.current !== null) clearTimeout(sidCopyTimer.current);
+			}, []);
 
 			// 峰谷切换不依赖额度接口轮询，避免跨过 09:00/12:00/14:00/18:00 后徽章滞后。
 			const [tariffNow, setTariffNow] = react.useState(() => Date.now());
@@ -4000,6 +4402,11 @@ window.__ModuleLoader__.load({
 			const tpsNode = hasTps
 				? react.createElement("span", { className: "dshqb_amount dshqb_tps", key: "tps" }, t("tps", { rate: formatTokensPerSecond(liveUsage.tokensPerSecond) }))
 				: null;
+			const costProviderOfModel = (model) => {
+				if (!model) return "";
+				const leg = (Array.isArray(cost?.legs) ? cost.legs : []).find((l) => l?.model === model && l?.provider);
+				return leg ? String(leg.provider) : "";
+			};
 
 			const rightCol = react.createElement("div", { className: "dshqb_col", key: "right" }, [
 				react.createElement("div", { className: "dshqb_card_header", key: "head" }, [
@@ -4008,12 +4415,16 @@ window.__ModuleLoader__.load({
 				]),
 				hasCost
 					? react.createElement("ul", { className: "dshqb_card_models", key: "models" },
-						(cost.models ?? []).filter((m) => (cost.costByModel[m] ?? 0) > 0).map((m, i) =>
-							react.createElement("li", { key: i }, [
-								react.createElement("span", { key: "m" }, "• " + (m === "unknown" ? t("model.unknown") : m)),
-								react.createElement("span", { key: "c" }, formatMoney(cost.costByModel[m], cost.currency ?? "CNY"))
-							])
-						)
+						(cost.models ?? []).filter((m) => (cost.costByModel[m] ?? 0) > 0).map((m, i) => {
+							const blended = blendedPerMTokenPrice(cost.costByModel[m], cost.tokensByModel?.[m])
+							const perM = showPricePerMToken && blended !== null
+								? formatPrice(blended, cost.currency ?? payload?.currency ?? "CNY") + "/M"
+								: null
+							return react.createElement("li", { key: i }, [
+								react.createElement("span", { key: "m" }, "• " + (m === "unknown" ? t("model.unknown") : (costProviderOfModel(m) ? costProviderOfModel(m) + "/" + m : m))),
+								react.createElement("span", { key: "c" }, formatMoney(cost.costByModel[m], cost.currency ?? "CNY") + (perM ? " · " + perM : ""))
+							]);
+						})
 					)
 					: react.createElement("div", { className: "dshqb_card_sub", key: "models" }, t("card.noCost")),
 				react.createElement("div", { className: "dshqb_card_hint", key: "hint" }, [
@@ -4128,8 +4539,8 @@ window.__ModuleLoader__.load({
 
 			const capsuleNode = showCapsule
 				? (showDock
-					? react.createElement(SpendCapsule, { t, key: "cap" })
-					: react.createElement("div", { className: "dshqb_host", key: "cap_host" }, react.createElement(SpendCapsule, { t })))
+					? react.createElement(SpendCapsule, { t, config: payload, key: "cap" })
+					: react.createElement("div", { className: "dshqb_host", key: "cap_host" }, react.createElement(SpendCapsule, { t, config: payload })))
 				: null;
 
 			if (!showDock) {
@@ -4145,8 +4556,42 @@ window.__ModuleLoader__.load({
 				rightCol
 			]) : null;
 
+			// 会话 ID 读数: 置于余额读数之前; 截断显示前 8 位, 悬停展示完整值, 点击复制。
+			const showSessionId = payload?.showSessionId !== false;
+			const sidText = sid !== null ? String(sid) : null;
+			const copySid = () => {
+				if (!sidText) return;
+				const flashCopied = () => {
+					setSidCopied(true);
+					if (sidCopyTimer.current !== null) clearTimeout(sidCopyTimer.current);
+					sidCopyTimer.current = setTimeout(() => { sidCopyTimer.current = null; setSidCopied(false); }, 1400);
+				};
+				const clipboard = typeof navigator !== "undefined" && navigator.clipboard ? navigator.clipboard : null;
+				if (clipboard && typeof clipboard.writeText === "function") {
+					clipboard.writeText(sidText).then(flashCopied, flashCopied);
+				} else {
+					flashCopied();
+				}
+			};
+			const sidNode = showSessionId && sidText !== null
+				? react.createElement(HoverTooltip, {
+					content: t("session.idTooltip", { id: sidText }),
+					key: "sid_tip"
+				}, react.createElement("button", {
+					type: "button",
+					className: "dshqb_sid" + (sidCopied ? " dshqb_sid_copied" : ""),
+					key: "sid",
+					"aria-label": t("session.idTooltip", { id: sidText }),
+					onClick: copySid
+				}, sidCopied ? t("session.copied") : "#" + shortSessionId(sidText)))
+				: null;
+
 			const triggerChildren = [];
-			if (balNode !== null) triggerChildren.push(balNode);
+			if (sidNode !== null) triggerChildren.push(sidNode);
+			if (balNode !== null) {
+				if (triggerChildren.length > 0) triggerChildren.push(react.createElement("span", { className: "dshqb_sep", "aria-hidden": true, key: "sep_sid" }, "|"));
+				triggerChildren.push(balNode);
+			}
 			if (costNode !== null) {
 				if (triggerChildren.length > 0) triggerChildren.push(react.createElement("span", { className: "dshqb_sep", "aria-hidden": true, key: "sep_cost" }, "|"));
 				triggerChildren.push(costNode);

@@ -4,7 +4,7 @@
 
 DeepSeek Harness（`dsh web`）额度插件：在输入框下方显示账户额度与本会话估算消耗；右下角另有可拖动的累计消耗胶囊。设置在侧栏「额度」（最后一项，货币硬币图标），分成多张可折叠卡片。
 
-> 兼容性：`dsh-credits 0.3.0` 已适配 `dsh 0.1.1-rc.1`（即 0.1.1-rc1）的新版会话投影接口；TPS 与本会话金额可正常传递到 Web 前端，同时保留对旧版投影接口的兼容。
+> 兼容性：`dsh-credits 0.3.1` 已适配 `dsh 0.1.1-rc.1`（即 0.1.1-rc1）的新版会话投影接口；TPS 与本会话金额可正常传递到 Web 前端，同时保留对旧版投影接口的兼容。
 
 - **账户额度 + 状态灯**  
   DeepSeek 模式如 `🟢 余额 ¥97.69`；OpenCode Go 模式如 `🟢 Go 额度 月 6% · 周 12% · 5h 9%`。点击圆点可立即强刷。
@@ -18,6 +18,10 @@ DeepSeek Harness（`dsh web`）额度插件：在输入框下方显示账户额�
   直接消费 DSH 会话事件，在流式输出时估算并显示 `TPS n tok/s`；收到 provider 精确 usage 后自动替换估算值。可在「设置 → 展示 → 实时 TPS」关闭，不需要额外安装 `@linxin666/dsh-live-stats`。
 - **累计消耗胶囊**  
   右下角可拖动气泡，查看今天 / 昨天 / 本周 / 本月 / 自定义时间范围内的跨会话估算总额（按当前计价货币与单价现算）。
+- **基元律动钱包余额**
+  内置 Cookie 鉴权模板查询基元律动（tokenrhythm.studio）钱包余额（CNY），粘贴 `sess_...` 值自动补全为 `tr_session=...`；配套内置官方模型价格表，按渠道自动套用。
+- **会话 ID 读数**
+  底部读数前显示当前会话 ID（截断显示，点击复制完整值）；胶囊可展示每个模型的每 1M tokens 折算单价。
 - **设置卡片**  
   展示、额度查询、阈值与刷新、模型单价、YAML 导出各一张卡。每张独立「放弃修改 / 保存」，改过的字段可「恢复默认」。关掉再打开，未保存的草稿还在。
   顶部「启用额度功能」总开关关闭后会隐藏额度、TPS、峰谷徽章、悬停详情与累计消耗，停止额度轮询，并锁定展示、额度查询、阈值与刷新；模型单价和 YAML 导出仍可用。
@@ -107,7 +111,9 @@ OpenCode Go 模式下，卡片改成三个窗口的用量百分比与重置时�
 除 DeepSeek 和 OpenCode Go 外，设置页内置了以下模板：
 
 - 订阅套餐：Kimi For Coding、智谱 GLM Coding / Z.AI、MiniMax Coding Plan（国内 / 国际）
-- 账户余额：StepFun、OpenRouter、Novita AI
+- 账户余额：StepFun、OpenRouter、Novita AI、基元律动（Cookie 鉴权，凭证引用 `TOKENRHYTHM_COOKIE`）
+
+基元律动模板查询 `GET https://tokenrhythm.studio/api/wallet/summary`：设置页可粘贴完整 `tr_session=...` 或直接粘贴 `sess_...` 值（自动补全键名）。该渠道模型单价已按官方价格表内置（`providerPrices.tokenrhythm`），无需手动配置。
 
 硅基流动不再提供内置余额模板。旧 `/user/info` 无法可靠反映网页现金余额和代金券；需要时请给对应 DSH 供应商选择「自定义 HTTP 接口」，自行配置网页接口与会话凭证。网页内部接口可能随时调整，Cookie 失效时需要重新填写。
 
@@ -180,6 +186,8 @@ dsh plugin --profile web remove dsh-balance
 | `showCapsule` | `true` | 右下角累计消耗胶囊 |
 | `showPopover` | `true` | 悬停底部读数时的双栏详情 |
 | `showTps` | `true` | 是否显示实时 TPS |
+| `showSessionId` | `true` | 底部读数前显示当前会话 ID；点击复制完整值 |
+| `showPricePerMToken` | `false` | 胶囊的本会话消耗列表中显示每个模型的每 1M tokens 折算单价 |
 | `enabled` | `true` | 额度功能总开关；关闭后隐藏相关 UI、停止轮询，并锁定展示、额度查询、阈值与刷新；不影响模型单价和 YAML 导出 |
 
 ### 多个 OpenCode Go 账号
@@ -272,6 +280,12 @@ dsh plugin --profile web remove dsh-balance
 ```
 
 `prices` 是「当前 `currency` 下每 1M token」的单价。V4 可写 `peak` / `offPeak`（高峰 / 低谷）。内置 `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp` 如果只有三个刊例字段，插件仍按官方峰谷表计价（兼容旧配置）。自行添加的模型只写三字段则全天按该价计，等效峰谷倍率 1。高峰为北京时间周一至周五 09:00–12:00、14:00–18:00，其余时段（含周末全天）为低谷。DeepSeek 账户的 CNY / USD 是两套独立钱包：底部会列出选定货币，以及其它仍有余额的钱包；悬停卡片列出全部钱包。计价货币只影响本会话/累计估算和状态灯，不会把其它钱包藏掉。计价仅支持官方提供的 CNY / USD 两套价格，不做汇率换算；旧版 EUR 实际复用了 USD 数值，升级后会按 USD 显示。V4 在 2026-08-17 之后按北京时间走峰谷价，人民币和美元同步切换。
+
+### 渠道级与时间分段定价
+
+- `providerPrices[providerId][model]`：按 DSH 供应商覆盖模型单价，未配置时回退顶级 `prices` / `defaultPrices`。渠道键先精确匹配，再回退剥离末段 `-N` 的基渠道（如 `tokenrhythm-1` → `tokenrhythm`）。基元律动官方价格表即以 `providerPrices.tokenrhythm` 内置。
+- `prices[model].schedules`：时间分段定价。区间半开 `[from, to)`，`from` / `to` 支持 ISO 时间或毫秒；多条分段同时命中取 `from` 最大者。分段价可带 `peak` / `offPeak`，命中时段继续叠加日内峰谷。
+- 官方峰谷规则演进：2026-08-17 起实行峰谷定价（周末同工作日）；2026-08-23 00:00（北京时间）起周末全天谷价。
 
 ### 自定义 HTTP（高级 YAML）
 
@@ -368,11 +382,23 @@ dsh plugin --profile web remove dsh-balance
 | `POST /query-credits/config` | 保存配置并立即生效 |
 | `POST /query-credits/test-connection` | 使用当前供应商草稿测试模板或自定义 HTTP，并返回可选字段或脱敏后的错误诊断 |
 
-本会话花费由 `queryCreditsCost` 投影折叠 token（每笔带事件时间），按该笔发生时的北京时间峰谷价计价；前端切货币时仍按各自行情重算，不会用“此刻”的单价覆盖早上的高峰用量。实时 TPS 由同一组会话事件生成 `liveTokenUsage` 投影：流式 chunk 阶段按字符估算，provider usage 到达后替换为精确输出 token，步骤结束后保留最近一次速率。累计消耗同样按事件时间计价，并落盘到 `$DSH_HOME/storages/dsh-credits-spend.json`。胶囊位置和所选时间范围记在浏览器 `localStorage`。
+本会话花费由 `queryCreditsCost` 投影折叠 token（每笔带事件时间），按该笔发生时的北京时间峰谷价计价；前端切货币时仍按各自行情重算，不会用“此刻”的单价覆盖早上的高峰用量。实时 TPS 由同一组会话事件生成 `liveTokenUsage` 投影：流式 chunk 阶段按字符估算，provider usage 到达后替换为精确输出 token，步骤结束后保留最近一次速率。累计消耗同样按事件时间计价，并落盘到 `$DSH_HOME/storages/dsh-credits-spend.json`。DSH `fork()` 会把父会话前缀事件复制进子会话；跨会话累计按指纹（时间 + 模型 + 渠道 + 四桶 token）去重，避免同一笔调用按 fork 链长度重复计费。设置页保存的运行时配置持久化到 `$DSH_HOME/storages/dsh-credits-config.json`（不含明文密钥），重启不丢失。胶囊位置和所选时间范围记在浏览器 `localStorage`。
 
 密钥走 Harness `credentials`，默认不写进配置文件。
 
 ## 更新记录
+
+### 0.3.1
+
+基元律动支持、渠道级定价与会话 ID 读数。
+
+- 新增基元律动钱包余额内置模板：Cookie 鉴权，粘贴 `sess_...` 自动补全 `tr_session=`；配套内置官方模型价格表
+- 渠道级定价 `providerPrices`：按 DSH 供应商覆盖模型单价，`xxx-N` 渠道键回退 `xxx` 基渠道
+- 时间分段定价 `schedules`：半开区间 `[from, to)`，多条命中取 `from` 最大，可叠加日内峰谷
+- 官方峰谷规则修正：2026-08-23 00:00（北京）起周末全天谷价（此前周末同工作日峰谷）
+- 底部读数新增会话 ID 显示（`showSessionId`，点击复制）；胶囊可显示每模型每 1M tokens 折算单价（`showPricePerMToken`）
+- 跨会话累计消耗按指纹去重 fork 复制样本，避免 fork 链重复计费；按模型统计 token 并归因渠道
+- 设置页运行时配置持久化到 `$DSH_HOME/storages/dsh-credits-config.json`（不含明文密钥）
 
 ### 0.3.0
 

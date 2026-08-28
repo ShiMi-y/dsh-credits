@@ -3,12 +3,16 @@
  * CNY / USD 是两套官方价目，不是汇率换算；峰谷时段两边同步切换。
  * USD 官方价 = CNY 官方价 × 0.14（与刊例 1 / 0.14、2 / 0.28 一致）。
  * 高峰：北京时间周一至周五 09:00–12:00、14:00–18:00；其余（含周末）为低谷，低谷 = 高峰 × 0.5。
+ * 峰谷执行规则官方分两阶段：
+ *   ① 2026-08-17 00:00（北京）起实行峰谷定价，周末也是峰谷（与工作日同规则）；
+ *   ② 2026-08-23 00:00（北京，含）起，周末全天谷价（工作日峰谷不变）。
  * 设置里的 prices[model].peak / .offPeak 可覆盖官方峰谷。
  * 内置 flash / pro / vision-exp 若只有刊例三字段，仍走官方峰谷表（兼容涨价前旧配置）。
  * 其它模型只有三字段时按固定价计，等效峰谷倍率 1，不再套官方表。
  */
 
 export const V4_CUTOFF_MS = 1786896000000 // 2026-08-17T00:00:00+08:00
+export const WEEKEND_OFFPEAK_CUTOFF_MS = 1787414400000 // 2026-08-23T00:00:00+08:00（含）起周末全天谷价
 
 const V4_CNY = {
   'deepseek-v4-flash': {
@@ -52,12 +56,18 @@ export const normalizePricingCurrency = (currency) => ['USD', 'EUR'].includes(St
 
 export const hasTariffTiers = (p) => isFiniteRate(p?.peak) && isFiniteRate(p?.offPeak)
 
-/** 北京时间周一至周五 09:00–12:00、14:00–18:00 为高峰，周末全天低谷。 */
+/**
+ * 北京时间高峰时段判定（官方峰谷价规则随日期演进）：
+ * - 2026-08-17 前为涨价前刊例价，本函数不参与计价；
+ * - 2026-08-17 00:00 起实行峰谷定价，周一至周五 09:00–12:00、14:00–18:00 高峰，周末同规则（周末也是峰谷）；
+ * - 2026-08-23 00:00（含）起，周末全天谷价（工作日不变）。
+ */
 export const isPeakBeijing = (timestamp) => {
   const beijing = new Date(Number(timestamp) + 8 * 3600 * 1000)
   const hour = beijing.getUTCHours()
   const dow = beijing.getUTCDay()
-  if (dow === 0 || dow === 6) return false
+  const weekend = dow === 0 || dow === 6
+  if (weekend && Number(timestamp) >= WEEKEND_OFFPEAK_CUTOFF_MS) return false
   return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)
 }
 
@@ -90,21 +100,86 @@ const asRate = (p) => ({
   output: Number(p.output),
 })
 
-/** 实时计算指定模型在指定时间戳下的单价。 */
-export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now()) => {
+const parseScheduleBound = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const t = Date.parse(String(value))
+  return Number.isNaN(t) ? null : t
+}
+
+/**
+ * 在 schedules 时间分段中选取指定时间戳生效的分段。
+ * 半开区间 [from, to)：from <= t < to；多条分段同时命中时取 from 最大者（后者覆盖）；
+ * 无起点(from=null)的分段只在没有更具体分段命中时生效。
+ */
+const scheduleAt = (schedules, timestamp) => {
+  let best = null
+  for (const seg of schedules ?? []) {
+    const from = parseScheduleBound(seg?.from)
+    const to = parseScheduleBound(seg?.to)
+    if (from !== null && timestamp < from) continue
+    if (to !== null && timestamp >= to) continue
+    if (best === null) { best = { from, price: seg?.price }; continue }
+    if (from === null) continue
+    if (best.from === null || from > best.from) best = { from, price: seg?.price }
+  }
+  return best?.price
+}
+
+/** 解析一个模型价格对象在指定时间戳下的实际单价：时间分段 + 日内峰谷叠加。 */
+const effectiveRateAt = (price, timestamp) => {
+  const seg = scheduleAt(price?.schedules, timestamp)
+  const base = seg ?? price
+  if (hasTariffTiers(base)) return asRate(isPeakBeijing(timestamp) ? base.peak : base.offPeak)
+  return isFiniteRate(base) ? asRate(base) : null
+}
+
+/**
+ * 渠道价表键候选：先精确匹配，再回退到剥离末段 `-N` 的基渠道键
+ * （例如 `tokenrhythm-1` 回退到 `tokenrhythm`），避免多个同源渠道号导致渠道价漏配。
+ */
+const providerPriceCandidates = (provider) => {
+  const keys = []
+  if (provider) {
+    keys.push(provider)
+    const base = provider.replace(/-\d+$/, '')
+    if (base !== provider) keys.push(base)
+  }
+  return keys
+}
+
+/**
+ * 实时计算指定模型在指定时间戳、指定渠道(provider)下的单价。
+ * 回退链：providerPrices[providerId][model] → prices[model]（顶级）→ defaultPrices。
+ * 渠道级价格全权接管（含 schedules/峰谷），不参与内置 V4 表；顶级价格的 schedules 同样生效。
+ */
+export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now(), providerId) => {
   const config = typeof configOrGetter === 'function' ? configOrGetter() : configOrGetter
   const currency = normalizePricingCurrency(config.currency)
   const table = v4TableFor(currency)?.[model]
+
+  const provider = String(providerId ?? '').trim().toLowerCase()
+  if (provider) {
+    const key = providerPriceCandidates(provider).find((candidate) => config.providerPrices?.[candidate]?.[model] != null)
+    const providerLevel = key ? config.providerPrices[key][model] : null
+    if (providerLevel != null) {
+      const resolved = effectiveRateAt(providerLevel, timestamp)
+      if (resolved) return resolved
+    }
+  }
+
   const configured = config.prices?.[model]
-  const customTiers = hasTariffTiers(configured) ? configured : null
+  const scheduled = configured ? scheduleAt(configured.schedules, timestamp) : null
+  const effective = scheduled ?? configured
+  const customTiers = hasTariffTiers(effective) ? effective : null
 
   if (customTiers) {
-    if (table && timestamp < V4_CUTOFF_MS) return table.listed
+    if (!scheduled && table && timestamp < V4_CUTOFF_MS) return table.listed
     return asRate(isPeakBeijing(timestamp) ? customTiers.peak : customTiers.offPeak)
   }
 
-  if (isFiniteRate(configured) && !(table && PINNED_V4_MODELS.includes(model))) {
-    return asRate(configured)
+  if (isFiniteRate(effective) && !(!scheduled && table && PINNED_V4_MODELS.includes(model))) {
+    return asRate(effective)
   }
 
   if (table) {
@@ -112,11 +187,11 @@ export const resolveModelPrice = (configOrGetter, model, timestamp = Date.now())
     return isPeakBeijing(timestamp) ? table.peak : table.offPeak
   }
 
-  return configured ?? config.defaultPrices
+  return effective ?? config.defaultPrices
 }
 
-export const priceBuckets = (cfg, model, buckets, timestamp = Date.now()) => {
-  const price = resolveModelPrice(cfg, model, timestamp)
+export const priceBuckets = (cfg, model, buckets, timestamp = Date.now(), providerId) => {
+  const price = resolveModelPrice(cfg, model, timestamp, providerId)
   return ((buckets.uncachedInputTokens + buckets.cacheWriteTokens) * price.cacheMiss +
     buckets.cacheReadTokens * price.cacheHit +
     buckets.outputTokens * price.output) / 1e6

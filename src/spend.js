@@ -89,16 +89,21 @@ export const resolveSpendRange = (range, fromValue, toValue, now = Date.now()) =
   return { ok: true, range: 'today', from: startOfDay(now), to: now }
 }
 
-export const initSpendFold = () => ({ currentModel: null, last: null, samples: {} })
+export const initSpendFold = () => ({ currentModel: null, currentProvider: null, last: null, samples: {} })
 
 export const applySpendEvent = (state, event) => {
   let nextModel = state.currentModel
+  let nextProvider = state.currentProvider
   if (event.type === 'request/header') {
     const model = event.data?.header?.config?.model
     if (typeof model === 'string' && model !== '') nextModel = model
+    const provider = event.data?.header?.config?.provider
+    if (typeof provider === 'string' && provider !== '') nextProvider = provider
   } else if (event.type === 'request/context') {
     const model = event.data?.model
     if (typeof model === 'string' && model !== '') nextModel = model
+    const provider = event.data?.provider
+    if (typeof provider === 'string' && provider !== '') nextProvider = provider
   }
 
   let usage = null
@@ -112,23 +117,27 @@ export const applySpendEvent = (state, event) => {
   }
 
   if (usage === null) {
-    return nextModel === state.currentModel ? state : { ...state, currentModel: nextModel }
+    if (nextModel === state.currentModel && nextProvider === state.currentProvider) return state
+    return { ...state, currentModel: nextModel, currentProvider: nextProvider }
   }
 
   const model = nextModel ?? 'unknown'
+  const provider = nextProvider ?? undefined
   const buckets = bucketsOf(usage)
   const key = `${turn}:${step}`
   const previous = state.samples[key]
-  if (previous && previous.model === model && bucketsEqual(previous.buckets, buckets) && previous.t === (event.time ?? previous.t)) {
-    return nextModel === state.currentModel ? state : { ...state, currentModel: nextModel }
+  if (previous && previous.model === model && previous.provider === provider && bucketsEqual(previous.buckets, buckets) && previous.t === (event.time ?? previous.t)) {
+    if (nextModel === state.currentModel && nextProvider === state.currentProvider) return state
+    return { ...state, currentModel: nextModel, currentProvider: nextProvider }
   }
 
   return {
     currentModel: nextModel,
+    currentProvider: nextProvider,
     last: { turn, step, model },
     samples: {
       ...state.samples,
-      [key]: { t: Number(event.time) || 0, model, buckets },
+      [key]: { t: Number(event.time) || 0, model, provider, buckets },
     },
   }
 }
@@ -142,6 +151,8 @@ export const foldSpendEvents = (events) => {
 export const aggregateSpend = (samples, cfg, from, to) => {
   const tokens = { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
   const costByModel = {}
+  const tokensByModel = {}
+  const providerByModel = {}
   const sessionIds = new Set()
   let cost = 0
   let calls = 0
@@ -150,13 +161,22 @@ export const aggregateSpend = (samples, cfg, from, to) => {
     const t = Number(sample.t)
     if (!Number.isFinite(t) || t < from || t > to) continue
     const b = sample.buckets ?? zeroBuckets()
+    const model = sample.model ?? 'unknown'
     tokens.uncachedInput += b.uncachedInputTokens
     tokens.cacheRead += b.cacheReadTokens
     tokens.cacheWrite += b.cacheWriteTokens
     tokens.output += b.outputTokens
-    const c = priceBuckets(cfg, sample.model ?? 'unknown', b, t)
+    const prevTok = tokensByModel[model] ?? { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+    tokensByModel[model] = {
+      uncachedInput: prevTok.uncachedInput + b.uncachedInputTokens,
+      cacheRead: prevTok.cacheRead + b.cacheReadTokens,
+      cacheWrite: prevTok.cacheWrite + b.cacheWriteTokens,
+      output: prevTok.output + b.outputTokens,
+    }
+    const c = priceBuckets(cfg, model, b, t, sample.provider)
     cost += c
-    if (c > 0) costByModel[sample.model ?? 'unknown'] = round6((costByModel[sample.model ?? 'unknown'] ?? 0) + c)
+    if (c > 0) costByModel[model] = round6((costByModel[model] ?? 0) + c)
+    if (!providerByModel[model] && sample.provider) providerByModel[model] = String(sample.provider)
     if (sample.sessionId) sessionIds.add(sample.sessionId)
     calls += 1
     inRange.push({ ...sample, cost: round6(c) })
@@ -164,6 +184,8 @@ export const aggregateSpend = (samples, cfg, from, to) => {
   return {
     cost: round6(cost),
     costByModel,
+    tokensByModel,
+    providerByModel,
     tokens,
     calls,
     sessions: sessionIds.size,
