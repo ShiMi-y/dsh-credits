@@ -1210,6 +1210,7 @@ window.__ModuleLoader__.load({
 			"spend.yesterday": "昨天",
 			"spend.week": "本周",
 			"spend.month": "本月",
+			"spend.all": "全部",
 			"spend.custom": "自定义",
 			"spend.from": "开始时间",
 			"spend.to": "结束时间",
@@ -1536,6 +1537,7 @@ window.__ModuleLoader__.load({
 			"spend.yesterday": "Yesterday",
 			"spend.week": "This week",
 			"spend.month": "This month",
+			"spend.all": "All",
 			"spend.custom": "Custom",
 			"spend.from": "From",
 			"spend.to": "To",
@@ -3905,6 +3907,7 @@ window.__ModuleLoader__.load({
 				["yesterday", t("spend.yesterday")],
 				["week", t("spend.week")],
 				["month", t("spend.month")],
+				["all", t("spend.all")],
 				["custom", t("spend.custom")]
 			];
 			const lastMoved = react.useRef(false);

@@ -86,6 +86,9 @@ export const resolveSpendRange = (range, fromValue, toValue, now = Date.now()) =
   if (kind === 'month') {
     return { ok: true, range: kind, from: startOfMonth(now), to: now }
   }
+  if (kind === 'all') {
+    return { ok: true, range: 'all', from: 0, to: now }
+  }
   return { ok: true, range: 'today', from: startOfDay(now), to: now }
 }
 
