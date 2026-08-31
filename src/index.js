@@ -651,6 +651,10 @@ export const Config = Schema.object({
   timeoutMs: Schema.number().min(1000).default(8000),
   /** 花费估算的计价货币(与 prices 一致) */
   currency: Schema.string().default('CNY'),
+  /** 展示层费用系数: 计算结果 × 系数后展示; 不影响 token 统计与单价。全局默认 1。 */
+  costMultiplier: Schema.number().min(0).default(1),
+  /** 渠道+模型级系数覆盖: costMultiplierOverrides[providerId][model] = 系数; 未命中回退全局 costMultiplier。 */
+  costMultiplierOverrides: Schema.dict(Schema.dict(Schema.number().min(0))).default({}),
   prices: Schema.dict(ModelPrice).default(officialV4ConfigPrices('CNY')),
   /** 渠道×模型两级定价: providerPrices[providerId][model]; 未配置时回退顶级 prices / defaultPrices */
   providerPrices: Schema.dict(Schema.dict(ModelPrice)).default({}),
@@ -1545,6 +1549,13 @@ export function apply(ctx, config) {
     clientPollIntervalMs: config.clientPollIntervalMs ?? 30000,
     timeoutMs: config.timeoutMs ?? 8000,
     currency: normalizePricingCurrency(config.currency),
+    costMultiplier: Number.isFinite(Number(config.costMultiplier)) && Number(config.costMultiplier) >= 0 ? Number(config.costMultiplier) : 1,
+    costMultiplierOverrides: config.costMultiplierOverrides && typeof config.costMultiplierOverrides === 'object'
+      ? Object.fromEntries(Object.entries(config.costMultiplierOverrides).map(([pid, models]) => [
+        pid,
+        Object.fromEntries(Object.entries(models ?? {}).filter(([, v]) => Number.isFinite(Number(v)) && Number(v) >= 0).map(([m, v]) => [m, Number(v)])),
+      ]))
+      : {},
     pricingEpoch: 0,
     warningThreshold: config.warningThreshold ?? 10,
     dangerThreshold: config.dangerThreshold ?? 5,
@@ -1560,7 +1571,7 @@ export function apply(ctx, config) {
   const persistedConfigKeys = [
     'enabled', 'quotaMode', 'showDock', 'dockLayout', 'showCapsule', 'showPopover', 'showTps', 'showSessionId', 'showPricePerMToken',
     'provider', 'apiKeyRef', 'baseUrl', 'opencodeApiKeyRef', 'opencodeBaseUrl',
-    'refreshIntervalMs', 'clientPollIntervalMs', 'timeoutMs', 'currency',
+    'refreshIntervalMs', 'clientPollIntervalMs', 'timeoutMs', 'currency', 'costMultiplier', 'costMultiplierOverrides',
     'warningThreshold', 'dangerThreshold', 'prices', 'providerPrices', 'defaultPrices',
     'quotaSources', 'providerQuotas',
   ]
@@ -1608,10 +1619,20 @@ export function apply(ctx, config) {
       spendFolds.set(key, incoming)
       return
     }
+    // 同 key 样本冲突时优先保留带 provider 的: backfill 全量重放含 request/header,
+    // live 在重启窗口可能漏捕获渠道信息; 缺渠道的旧样本不应覆盖完整的重放样本。
+    const samples = { ...(incoming.samples ?? {}) }
+    for (const [k, v] of Object.entries(cur.samples ?? {})) {
+      const prev = samples[k]
+      if (!prev) samples[k] = v
+      else if (!prev.provider && v.provider) samples[k] = v
+      else if (prev.provider && !v.provider) samples[k] = prev
+      else samples[k] = v
+    }
     spendFolds.set(key, {
       currentModel: cur.currentModel ?? incoming.currentModel,
       last: cur.last ?? incoming.last,
-      samples: { ...(incoming.samples ?? {}), ...(cur.samples ?? {}) },
+      samples,
     })
   }
   const ingestSessionEvents = (sessionId, events) => {
@@ -2268,6 +2289,8 @@ export function apply(ctx, config) {
       clientPollIntervalMs: runtimeConfig.clientPollIntervalMs,
       timeoutMs: runtimeConfig.timeoutMs,
       currency: runtimeConfig.currency,
+      costMultiplier: Number(runtimeConfig.costMultiplier ?? 1),
+      costMultiplierOverrides: { ...(runtimeConfig.costMultiplierOverrides ?? {}) },
       warningThreshold: runtimeConfig.warningThreshold,
       dangerThreshold: runtimeConfig.dangerThreshold,
       prices: { ...runtimeConfig.prices },
@@ -2353,6 +2376,8 @@ export function apply(ctx, config) {
         refreshIntervalMs: runtimeConfig.refreshIntervalMs,
         clientPollIntervalMs: runtimeConfig.clientPollIntervalMs,
         currency: runtimeConfig.currency,
+        costMultiplier: Number(runtimeConfig.costMultiplier ?? 1),
+        costMultiplierOverrides: { ...(runtimeConfig.costMultiplierOverrides ?? {}) },
         pricingEpoch: Number(runtimeConfig.pricingEpoch ?? 0),
         thresholds: {
           warning: runtimeConfig.warningThreshold,
@@ -2509,6 +2534,20 @@ export function apply(ctx, config) {
               if (typeof body.clientPollIntervalMs === 'number' && body.clientPollIntervalMs >= 5000) runtimeConfig.clientPollIntervalMs = body.clientPollIntervalMs
               if (typeof body.timeoutMs === 'number' && body.timeoutMs >= 1000) runtimeConfig.timeoutMs = body.timeoutMs
               if (typeof body.currency === 'string' && body.currency.trim()) runtimeConfig.currency = normalizePricingCurrency(body.currency)
+              if (typeof body.costMultiplier === 'number' && body.costMultiplier >= 0 && Number.isFinite(body.costMultiplier)) runtimeConfig.costMultiplier = body.costMultiplier
+              if (body.costMultiplierOverrides && typeof body.costMultiplierOverrides === 'object' && !Array.isArray(body.costMultiplierOverrides)) {
+                const clean = {}
+                for (const [pid, models] of Object.entries(body.costMultiplierOverrides)) {
+                  if (!models || typeof models !== 'object' || Array.isArray(models)) continue
+                  const mm = {}
+                  for (const [model, v] of Object.entries(models)) {
+                    const n = Number(v)
+                    if (Number.isFinite(n) && n >= 0) mm[model] = n
+                  }
+                  if (Object.keys(mm).length) clean[pid] = mm
+                }
+                runtimeConfig.costMultiplierOverrides = clean
+              }
             }
             // 总开关只停用额度相关功能；模型单价与 YAML 导出仍然可独立使用。
             if (body.prices && typeof body.prices === 'object') {
@@ -2702,15 +2741,47 @@ export function apply(ctx, config) {
           res.end()
           return
         }
-        const agg = aggregateSpend(allSpendSamples(), getConfig(), window.from, window.to)
+        const cfgNow = getConfig()
+        const agg = aggregateSpend(allSpendSamples(), cfgNow, window.from, window.to)
+        // 展示层系数(渠道+模型级): token 统计与单价不动, 仅金额展示 = 原计算结果 × 系数。
+        // 生效链: overrides[provider(含 -N 基渠道回退)][model] → overrides[provider]['*'] → 全局 costMultiplier(默认 1)。
+        const globalMult = Number(cfgNow.costMultiplier)
+        const overrides = cfgNow.costMultiplierOverrides ?? {}
+        const round6 = (n) => Math.round(n * 1e6) / 1e6
+        const multFor = (model, provider) => {
+          const prov = String(provider ?? '').trim().toLowerCase()
+          const m = String(model ?? '')
+          if (prov) {
+            const base = prov.replace(/-\d+$/, '')
+            for (const key of base !== prov ? [prov, base] : [prov]) {
+              const models = overrides[key]
+              if (models && typeof models === 'object') {
+                if (Number.isFinite(Number(models[m])) && Number(models[m]) >= 0) return Number(models[m])
+                if (Number.isFinite(Number(models['*'])) && Number(models['*']) >= 0) return Number(models['*'])
+              }
+            }
+          }
+          return Number.isFinite(globalMult) && globalMult >= 0 ? globalMult : 1
+        }
+        // agg.samples: 区间内逐样本(含 model/provider/cost); 按各自系数重乘。
+        let scaledTotal = 0
+        const scaledByModel = {}
+        for (const s of agg.samples ?? []) {
+          const mm = multFor(s.model, s.provider)
+          scaledTotal += (s.cost ?? 0) * mm
+          // 与 aggregateSpend 的 aggKey 同规则: 渠道前缀 + 模型, 保证与 tokensByModel 键一致。
+          const skey = s.provider ? String(s.provider) + '/' + (s.model ?? 'unknown') : (s.model ?? 'unknown')
+          if ((s.cost ?? 0) > 0 || mm !== 1) scaledByModel[skey] = round6((scaledByModel[skey] ?? 0) + (s.cost ?? 0) * mm)
+        }
         sendJson(res, 200, {
           ok: true,
           range: window.range,
           from: window.from,
           to: window.to,
           currency: agg.currency,
-          cost: agg.cost,
-          costByModel: agg.costByModel,
+          costMultiplier: Number.isFinite(globalMult) && globalMult >= 0 ? globalMult : 1,
+          cost: round6(scaledTotal),
+          costByModel: scaledByModel,
           tokensByModel: agg.tokensByModel,
           providerByModel: agg.providerByModel ?? {},
           tokens: agg.tokens,

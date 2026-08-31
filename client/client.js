@@ -668,7 +668,30 @@ window.__ModuleLoader__.load({
 				+ Number(leg.cacheRead) * Number(p.cacheHit ?? 0)
 				+ Number(leg.output) * Number(p.output ?? 0)) / 1e6;
 		}
-		/** 用当前计价货币按每笔事件时间重算本会话; 不用 /query-credits 里“此刻”的 V4 单价。 */
+		/** 用当前计价货币按每笔事件时间重算本会话; 不用 /query-credits 里“此刻”的 V4 单价。
+			* 展示层系数(渠道+模型级): 金额 = 原计算结果 × 系数(token 统计与单价不动)。
+			* 生效链: overrides[provider(含 -N 基渠道回退)][model] → overrides[provider]['*'] → 全局 costMultiplier(默认 1)。 */
+		function resolveCostMultiplier(payload, model, provider) {
+			const globalRaw = Number(payload?.costMultiplier);
+			const global = Number.isFinite(globalRaw) && globalRaw >= 0 ? globalRaw : 1;
+			const overrides = payload?.costMultiplierOverrides && typeof payload.costMultiplierOverrides === "object" ? payload.costMultiplierOverrides : {};
+			const prov = String(provider ?? "").trim().toLowerCase();
+			const m = String(model ?? "");
+			if (prov) {
+				const base = prov.replace(/-\d+$/, "");
+				const keys = base !== prov ? [prov, base] : [prov];
+				for (const key of keys) {
+					const models = overrides[key];
+					if (models && typeof models === "object") {
+						const exact = Number(models[m]);
+						if (Number.isFinite(exact) && exact >= 0) return exact;
+						const wildcard = Number(models["*"]);
+						if (Number.isFinite(wildcard) && wildcard >= 0) return wildcard;
+					}
+				}
+			}
+			return global;
+		}
 		function priceSession(cost, payload) {
 			const currency = normalizePricingCurrency(payload?.currency ?? cost?.currency);
 			const cfg = {
@@ -681,10 +704,14 @@ window.__ModuleLoader__.load({
 			if (!cost) {
 				return { cost: 0, costByModel: {}, models: [], tokens: undefined, tokensByModel: cost?.tokensByModel, currency, legs: [] };
 			}
+			const round6 = (n) => Math.round(n * 1e6) / 1e6;
 			if (legs.length === 0) {
+				// 无 legs(旧投影)时按全局系数缩放, 模型级拿不到 provider 只能用全局/通配。
+				const globalRaw = Number(payload?.costMultiplier);
+				const global = Number.isFinite(globalRaw) && globalRaw >= 0 ? globalRaw : 1;
 				return {
-					cost: cost.cost ?? 0,
-					costByModel: cost.costByModel ?? {},
+					cost: round6((cost.cost ?? 0) * global),
+					costByModel: Object.fromEntries(Object.entries(cost.costByModel ?? {}).map(([m, c]) => [m, round6(c * global)])),
 					models: cost.models ?? [],
 					tokens: cost.tokens,
 					tokensByModel: cost.tokensByModel,
@@ -696,11 +723,12 @@ window.__ModuleLoader__.load({
 			let total = 0;
 			for (const leg of legs) {
 				const c = priceLeg(cfg, leg);
-				if (c > 0) costByModel[leg.model] = Math.round(((costByModel[leg.model] ?? 0) + c) * 1e6) / 1e6;
-				total += c;
+				const scaled = c * resolveCostMultiplier(payload, leg.model, leg.provider);
+				if (scaled > 0) costByModel[leg.model] = round6((costByModel[leg.model] ?? 0) + scaled);
+				total += scaled;
 			}
 			return {
-				cost: Math.round(total * 1e6) / 1e6,
+				cost: round6(total),
 				costByModel,
 				models: cost.models ?? [],
 				tokens: cost.tokens,
@@ -996,6 +1024,11 @@ window.__ModuleLoader__.load({
 			"settings.quotaMode.custom": "固定展示一个额度源",
 			"settings.quotaModeHint": "自动模式会跟随当前供应商；没有匹配项时使用下方回退源。",
 			"settings.currency": "计价货币",
+			"settings.costMultiplier": "费用系数",
+			"settings.costMultiplierHint": "展示层金额 = 计算结果 × 系数；不影响 token 统计与单价。默认 1。",
+			"settings.costMultiplierOverrides": "渠道×模型系数 (costMultiplierOverrides)",
+			"settings.costMultiplierOverridesHint": "JSON: { 渠道: { 模型: 系数 } }，模型可用 \"*\" 通配；渠道支持 -N 后缀回退。未命中走全局系数。",
+			"settings.costMultiplierOverridesEmpty": "暂无渠道×模型系数覆盖。",
 			"settings.currencyHint": "用于本会话估算与状态灯。",
 			"settings.currencyHintQuota": "保存后用于本会话与累计消耗估算。",
 			"settings.warning": "预警阈值 (黄灯 🟡)",
@@ -1324,6 +1357,11 @@ window.__ModuleLoader__.load({
 			"settings.quotaMode.custom": "Always show one quota source",
 			"settings.quotaModeHint": "Automatic mode follows the current provider and uses the fallback below when unmatched.",
 			"settings.currency": "Currency",
+			"settings.costMultiplier": "Cost multiplier",
+			"settings.costMultiplierHint": "Displayed amount = computed cost × multiplier; token stats and unit prices stay untouched. Defaults to 1.",
+			"settings.costMultiplierOverrides": "Provider×model multipliers (costMultiplierOverrides)",
+			"settings.costMultiplierOverridesHint": "JSON: { provider: { model: multiplier } }; \"*\" wildcards a model, provider keys fall back across -N suffixes. Falls back to the global multiplier.",
+			"settings.costMultiplierOverridesEmpty": "No provider×model multiplier overrides yet.",
 			"settings.currencyHint": "For session estimates and the status light.",
 			"settings.currencyHintQuota": "Used for session and cumulative estimates after saving.",
 			"settings.warning": "Warning Threshold (Yellow 🟡)",
@@ -1582,6 +1620,8 @@ window.__ModuleLoader__.load({
 			showSessionId: true,
 			provider: "deepseek",
 			currency: "CNY",
+			costMultiplier: 1,
+			costMultiplierOverrides: {},
 			warningThreshold: 10,
 			dangerThreshold: 5,
 			refreshIntervalMs: 300000,
@@ -1633,7 +1673,13 @@ window.__ModuleLoader__.load({
 				`    warningThreshold: ${config.warningThreshold}`,
 				`    refreshIntervalMs: ${config.refreshIntervalMs}`,
 				`    clientPollIntervalMs: ${config.clientPollIntervalMs}`,
-				`    currency: ${config.currency}`
+				`    currency: ${config.currency}`,
+			...(Number.isFinite(Number(config.costMultiplier)) && Number(config.costMultiplier) !== 1
+				? [`    costMultiplier: ${config.costMultiplier}`]
+				: []),
+			...(config.costMultiplierOverrides && Object.keys(config.costMultiplierOverrides).length > 0
+				? [`    costMultiplierOverrides: ${JSON.stringify(config.costMultiplierOverrides)}`]
+				: [])
 			];
 			const rateString = (r) => `{ cacheHit: ${r.cacheHit}, cacheMiss: ${r.cacheMiss}, output: ${r.output} }`;
 			const priceString = (p) => {
@@ -1801,6 +1847,8 @@ window.__ModuleLoader__.load({
 				showSessionId: c.showSessionId !== false,
 				provider: typeof c.provider === "string" && c.provider.trim() ? c.provider.trim() : "deepseek",
 				currency: selectedCurrency,
+				costMultiplier: Number.isFinite(Number(c.costMultiplier)) && Number(c.costMultiplier) >= 0 ? Number(c.costMultiplier) : 1,
+				costMultiplierOverrides: c.costMultiplierOverrides && typeof c.costMultiplierOverrides === "object" ? cloneSettings(c.costMultiplierOverrides) : {},
 				warningThreshold: c.warningThreshold ?? 10,
 				dangerThreshold: c.dangerThreshold ?? 5,
 				refreshIntervalMs: c.refreshIntervalMs ?? 300000,
@@ -1826,7 +1874,7 @@ window.__ModuleLoader__.load({
 			display: ["showDock", "dockLayout", "showCapsule", "showPopover", "showTps", "showSessionId", "showPricePerMToken"],
 			quota: ["providerQuotas"],
 			thresholds: ["warningThreshold", "dangerThreshold", "refreshIntervalMs", "clientPollIntervalMs", "timeoutMs"],
-			pricing: ["currency", "prices", "defaultPrices", "providerPrices"]
+			pricing: ["currency", "prices", "defaultPrices", "providerPrices", "costMultiplier", "costMultiplierOverrides"]
 		};
 		const SECRET_FIELDS = ["apiKey", "opencodeApiKey"];
 		const SETTINGS_DRAFT_PREFIX = "dsh-credits.settingsDraft.";
@@ -1908,6 +1956,7 @@ window.__ModuleLoader__.load({
 			}
 			if (field === "providerQuotas") return providerQuotaListsEqual(a, b, context?.dshProviders);
 			if (field === "providerPrices") return JSON.stringify(stableComparable(a ?? {})) === JSON.stringify(stableComparable(b ?? {}));
+			if (field === "costMultiplierOverrides") return JSON.stringify(stableComparable(a ?? {})) === JSON.stringify(stableComparable(b ?? {}));
 			if (field === "defaultPrices") return JSON.stringify(a || {}) === JSON.stringify(b || {});
 			if ((a && typeof a === "object") || (b && typeof b === "object")) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 			if (typeof a === "boolean" || typeof b === "boolean") return Boolean(a) === Boolean(b);
@@ -2191,6 +2240,7 @@ window.__ModuleLoader__.load({
 			const [newModelMultiplier, setNewModelMultiplier] = react.useState(1);
 			const [newProviderId, setNewProviderId] = react.useState("");
 			const [providerPriceDrafts, setProviderPriceDrafts] = react.useState({});
+			const [multOverrideDraft, setMultOverrideDraft] = react.useState("");
 			const [scheduleDrafts, setScheduleDrafts] = react.useState({});
 			const [templateCookieDrafts, setTemplateCookieDrafts] = react.useState({});
 			const [customSourceDraft, setCustomSourceDraft] = react.useState(null);
@@ -2360,6 +2410,9 @@ window.__ModuleLoader__.load({
 						payload.timeoutMs = Number(merged.timeoutMs);
 					} else if (cardId === "pricing") {
 						payload.currency = String(merged.currency ?? "CNY").trim().toUpperCase();
+						const multRaw = Number(merged.costMultiplier);
+						payload.costMultiplier = Number.isFinite(multRaw) && multRaw >= 0 ? multRaw : 1;
+						payload.costMultiplierOverrides = merged.costMultiplierOverrides && typeof merged.costMultiplierOverrides === "object" ? cloneSettings(merged.costMultiplierOverrides) : {};
 						payload.prices = { ...(merged.prices || {}) };
 						payload.providerPrices = merged.providerPrices && typeof merged.providerPrices === "object" ? { ...merged.providerPrices } : {};
 						payload.defaultPrices = { ...(merged.defaultPrices || officialDefaultPrices(merged.currency)) };
@@ -3471,6 +3524,62 @@ window.__ModuleLoader__.load({
 						react.createElement("option", { value: "USD", key: "usd" }, "USD (美元 $)")
 					]))
 				]),
+				react.createElement(FieldGrid, { key: "mult_grid" }, [
+					react.createElement(FieldRow, {
+						t,
+						key: "costMultiplier",
+						label: t("settings.costMultiplier"),
+						hint: t("settings.costMultiplierHint"),
+						overridden: isSchemaOverridden("costMultiplier", view.costMultiplier, currency),
+						onReset: () => resetField("pricing", "costMultiplier"),
+						disabled: savingCard === "pricing"
+					}, react.createElement("input", {
+						type: "number",
+						min: "0",
+						step: "0.01",
+						className: "dshqb_input dshqb_input_num",
+						value: view.costMultiplier,
+						onChange: (e) => {
+							const n = e.target.value === "" ? 1 : Number(e.target.value);
+							patchCard("pricing", { costMultiplier: Number.isFinite(n) && n >= 0 ? n : 1 });
+						},
+						key: "inp"
+					})),
+					react.createElement(FieldRow, {
+						t,
+						key: "costMultiplierOverrides",
+						wide: true,
+						label: t("settings.costMultiplierOverrides"),
+						hint: t("settings.costMultiplierOverridesHint"),
+						disabled: savingCard === "pricing"
+					}, [
+						react.createElement("textarea", {
+							className: "dshqb_input dshqb_textarea",
+							rows: 3,
+							placeholder: '{ "tokenrhythm": { "glm-5.3": 0.35, "*": 0.6 } }',
+							value: multOverrideDraft !== "" ? multOverrideDraft : (Object.keys(view.costMultiplierOverrides || {}).length ? JSON.stringify(view.costMultiplierOverrides, null, 0) : ""),
+							onChange: (e) => setMultOverrideDraft(e.target.value),
+							key: "ta"
+						}),
+						react.createElement("button", {
+							type: "button",
+							className: "dshqb_btn dshqb_btn_secondary",
+							onClick: () => {
+								try {
+									const text = multOverrideDraft.trim();
+									const parsed = text ? JSON.parse(text) : {};
+									if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("object required");
+									patchCard("pricing", { costMultiplierOverrides: parsed });
+									setMultOverrideDraft("");
+									showToast(t("settings.savedToast"));
+								} catch (err) {
+									showToast(t("settings.invalidJson", { error: err instanceof Error ? err.message : String(err) }), "error", 5000);
+								}
+							},
+							key: "apply"
+						}, t("settings.providerPricesApply"))
+					])
+				]),
 				react.createElement("table", { className: "dshqb_pricing_table", key: "p_table" }, [
 					react.createElement("thead", { key: "th" }, [
 						react.createElement("tr", { key: "r" }, [
@@ -4003,7 +4112,7 @@ window.__ModuleLoader__.load({
 									? formatPrice(blended, payload?.currency ?? config?.currency ?? "CNY") + "/M"
 									: null
 								return react.createElement("li", { key: m }, [
-									react.createElement("span", { key: "m" }, "• " + (payload.providerByModel?.[m] ? payload.providerByModel[m] + "/" + m : m)),
+									react.createElement("span", { key: "m" }, "• " + m),
 									react.createElement("span", { key: "c" }, formatMoney(c, payload.currency ?? "CNY") + (perM ? " · " + perM : ""))
 								]);
 							})

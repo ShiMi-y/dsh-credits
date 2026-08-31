@@ -165,12 +165,14 @@ export const aggregateSpend = (samples, cfg, from, to) => {
     if (!Number.isFinite(t) || t < from || t > to) continue
     const b = sample.buckets ?? zeroBuckets()
     const model = sample.model ?? 'unknown'
+    // 聚合键含渠道前缀, 同模型多渠道(tokentrhythm-1/2)可区分展示; 无渠道时退化为纯模型名。
+    const aggKey = sample.provider ? String(sample.provider) + '/' + model : model
     tokens.uncachedInput += b.uncachedInputTokens
     tokens.cacheRead += b.cacheReadTokens
     tokens.cacheWrite += b.cacheWriteTokens
     tokens.output += b.outputTokens
-    const prevTok = tokensByModel[model] ?? { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
-    tokensByModel[model] = {
+    const prevTok = tokensByModel[aggKey] ?? { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+    tokensByModel[aggKey] = {
       uncachedInput: prevTok.uncachedInput + b.uncachedInputTokens,
       cacheRead: prevTok.cacheRead + b.cacheReadTokens,
       cacheWrite: prevTok.cacheWrite + b.cacheWriteTokens,
@@ -178,8 +180,8 @@ export const aggregateSpend = (samples, cfg, from, to) => {
     }
     const c = priceBuckets(cfg, model, b, t, sample.provider)
     cost += c
-    if (c > 0) costByModel[model] = round6((costByModel[model] ?? 0) + c)
-    if (!providerByModel[model] && sample.provider) providerByModel[model] = String(sample.provider)
+    if (c > 0) costByModel[aggKey] = round6((costByModel[aggKey] ?? 0) + c)
+    if (!providerByModel[aggKey] && sample.provider) providerByModel[aggKey] = String(sample.provider)
     if (sample.sessionId) sessionIds.add(sample.sessionId)
     calls += 1
     inRange.push({ ...sample, cost: round6(c) })
